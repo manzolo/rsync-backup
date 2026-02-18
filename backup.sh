@@ -237,6 +237,8 @@ parse_conf_file() {
         [[ -z "$line" || "$line" == \#* ]] && continue
         # Skip ENABLED line
         [[ "$line" == ENABLED=* ]] && continue
+        # Skip PRE_CMD line (handled separately)
+        [[ "$line" == PRE_CMD\ * ]] && continue
 
         if [[ "$line" == PATH\ * ]]; then
             _flush_job
@@ -320,6 +322,51 @@ load_plugins() {
         fi
 
         parse_conf_file "$pfile" "$pname"
+    done
+}
+
+# =============================================================================
+# Pre-commands execution
+# =============================================================================
+
+run_pre_commands() {
+    # Execute PRE_CMD lines from common.conf and active plugin confs
+    local -a conf_files=()
+    if [[ "$NO_COMMON" != true && -f "$COMMON_CONF" ]]; then
+        conf_files+=("$COMMON_CONF")
+    fi
+
+    local plugin_files=("$PLUGINS_DIR"/*.conf)
+    if [[ -e "${plugin_files[0]}" ]]; then
+        for pfile in "${plugin_files[@]}"; do
+            local pname
+            pname="$(basename "$pfile" .conf)"
+            if [[ ${#SELECTED_PLUGINS[@]} -gt 0 ]]; then
+                local found=false
+                for sp in "${SELECTED_PLUGINS[@]}"; do
+                    [[ "$sp" == "$pname" ]] && found=true && break
+                done
+                [[ "$found" == false ]] && continue
+            else
+                plugin_is_enabled "$pfile" || continue
+            fi
+            conf_files+=("$pfile")
+        done
+    fi
+
+    for cfile in "${conf_files[@]}"; do
+        while IFS= read -r line; do
+            line="$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+            if [[ "$line" == PRE_CMD\ * ]]; then
+                local cmd="${line#PRE_CMD }"
+                # Expand $HOME in command
+                cmd="${cmd//\$HOME/$HOME}"
+                if [[ "$QUIET" == false ]]; then
+                    echo -e "${C_CYAN}Running pre-command: $cmd${C_RESET}"
+                fi
+                eval "$cmd" || echo -e "${C_YELLOW}Warning: pre-command failed: $cmd${C_RESET}"
+            fi
+        done < "$cfile"
     done
 }
 
@@ -948,6 +995,7 @@ tui_run_backup() {
     # Drop to shell for backup execution
     clear
     show_preview
+    run_pre_commands
     run_backup
     print_summary
 
@@ -1009,13 +1057,13 @@ main() {
         exit 0
     fi
 
-    validate_paths
-
     if [[ "$QUIET" == false ]]; then
         show_preview
     fi
 
     confirm_execution
+    run_pre_commands
+    validate_paths
     run_backup
     print_summary
 }
