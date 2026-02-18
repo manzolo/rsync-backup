@@ -182,6 +182,11 @@ load_global_config() {
 
     # Append hostname to destination
     DST="$DST/$(hostname)"
+
+    # Ensure log file directory exists so tee doesn't fail the pipeline
+    if [[ -n "${LOG_FILE:-}" ]]; then
+        mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
+    fi
 }
 
 # Parse a conf file with PATH/INCLUDE/EXCLUDE format.
