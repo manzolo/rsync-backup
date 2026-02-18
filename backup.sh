@@ -962,13 +962,83 @@ tui_choose_plugin_file() {
     tui_edit_file "$PLUGINS_DIR/$choice.conf"
 }
 
+tui_choose_backup_scope() {
+    local plugin_files=("$PLUGINS_DIR"/*.conf)
+    if [[ ! -e "${plugin_files[0]}" ]]; then
+        echo "all"
+        return
+    fi
+
+    # Build menu: "all" + each enabled plugin
+    local -a menu_args=()
+    menu_args+=("all" "All enabled plugins + common")
+    menu_args+=("common" "Common paths only")
+    for pfile in "${plugin_files[@]}"; do
+        local pname desc
+        pname="$(basename "$pfile" .conf)"
+        # Show only enabled plugins (or those in SELECTED_PLUGINS)
+        if [[ ${#SELECTED_PLUGINS[@]} -gt 0 ]]; then
+            local found=false
+            for sp in "${SELECTED_PLUGINS[@]}"; do
+                [[ "$sp" == "$pname" ]] && found=true && break
+            done
+            [[ "$found" == false ]] && continue
+        else
+            plugin_is_enabled "$pfile" || continue
+        fi
+        desc="$(plugin_description "$pfile")"
+        menu_args+=("$pname" "$desc")
+    done
+
+    local choice
+    if [[ "$DIALOG_CMD" == "dialog" ]]; then
+        choice=$($DIALOG_CMD --clear --title "Backup Scope" \
+            --menu "What to back up:" 20 60 12 \
+            "${menu_args[@]}" \
+            3>&1 1>&2 2>&3) || return 1
+    else
+        choice=$($DIALOG_CMD --title "Backup Scope" \
+            --menu "What to back up:" 20 60 12 \
+            "${menu_args[@]}" \
+            3>&1 1>&2 2>&3) || return 1
+    fi
+    echo "$choice"
+}
+
 tui_run_backup() {
     local is_dry_run="$1"
+
+    # Ask user what to back up
+    local scope
+    scope="$(tui_choose_backup_scope)" || return
+
+    # Save and override SELECTED_PLUGINS based on scope
+    local -a saved_plugins=("${SELECTED_PLUGINS[@]}")
+    local saved_no_common="$NO_COMMON"
+
+    case "$scope" in
+        all)
+            # Use current selection (all enabled or SELECTED_PLUGINS)
+            NO_COMMON=false
+            ;;
+        common)
+            SELECTED_PLUGINS=("__none__")
+            NO_COMMON=false
+            ;;
+        *)
+            SELECTED_PLUGINS=("$scope")
+            NO_COMMON=true
+            ;;
+    esac
 
     # Reload jobs
     ALL_JOBS=()
     load_common
     load_plugins
+
+    # Restore saved state
+    SELECTED_PLUGINS=("${saved_plugins[@]}")
+    NO_COMMON="$saved_no_common"
 
     if [[ ${#ALL_JOBS[@]} -eq 0 ]]; then
         $DIALOG_CMD --title "No Jobs" --msgbox "No backup jobs configured." 8 50
