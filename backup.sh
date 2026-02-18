@@ -1096,6 +1096,8 @@ tui_run_backup() {
     ALL_JOBS=()
     load_common
     load_plugins
+    local -a scope_plugins=("${SELECTED_PLUGINS[@]}")
+    local scope_no_common="$NO_COMMON"
 
     # Restore saved state
     SELECTED_PLUGINS=("${saved_plugins[@]}")
@@ -1127,7 +1129,11 @@ tui_run_backup() {
     clear
     show_preview
     sudo_preauth
+    SELECTED_PLUGINS=("${scope_plugins[@]}")
+    NO_COMMON="$scope_no_common"
     run_pre_commands
+    SELECTED_PLUGINS=("${saved_plugins[@]}")
+    NO_COMMON="$saved_no_common"
     run_backup
     sudo_keepalive_stop
     print_summary
