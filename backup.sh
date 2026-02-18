@@ -1,0 +1,1034 @@
+#!/usr/bin/env bash
+# =============================================================================
+# Rsync Backup Manager - Unified backup system with plugin-based configuration
+# =============================================================================
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+GLOBAL_CONF="$SCRIPT_DIR/backup.conf"
+COMMON_CONF="$SCRIPT_DIR/common.conf"
+PLUGINS_DIR="$SCRIPT_DIR/plugins"
+
+# --- Color codes ---
+C_RESET='\033[0m'
+C_RED='\033[0;31m'
+C_GREEN='\033[0;32m'
+C_YELLOW='\033[0;33m'
+C_MAGENTA='\033[0;35m'
+C_CYAN='\033[0;36m'
+C_BOLD='\033[1m'
+
+# --- Global state ---
+DRY_RUN=false
+SKIP_CONFIRM=false
+USE_TUI=false
+NO_COMMON=false
+NO_DELETE=false
+QUIET=false
+LIST_ONLY=false
+SHOW_HELP=false
+declare -a SELECTED_PLUGINS=()
+declare -a ALL_JOBS=()     # "source|dest|includes|excludes|needs_sudo|label"
+DIALOG_CMD=""
+TOTAL_FILES=0
+TOTAL_ERRORS=0
+START_TIME=0
+
+# --- Global config defaults ---
+DST=""
+RSYNC_FLAGS="--archive --verbose --human-readable --progress --partial"
+RSYNC_DELETE=yes
+LOG_FILE=""
+
+# =============================================================================
+# Dependency checks
+# =============================================================================
+
+check_dependencies() {
+    if ! command -v rsync &>/dev/null; then
+        echo -e "${C_RED}Error: rsync is not installed.${C_RESET}"
+        read -rp "Install it now? [y/N] " ans
+        if [[ "$ans" =~ ^[Yy]$ ]]; then
+            sudo apt install -y rsync || { echo -e "${C_RED}Installation failed. Exiting.${C_RESET}"; exit 1; }
+        else
+            echo "Cannot continue without rsync. Exiting."
+            exit 1
+        fi
+    fi
+
+    if [[ "$USE_TUI" == true ]]; then
+        detect_dialog
+        if [[ -z "$DIALOG_CMD" ]]; then
+            echo -e "${C_RED}Error: neither dialog nor whiptail is installed.${C_RESET}"
+            read -rp "Install dialog now? [y/N] " ans
+            if [[ "$ans" =~ ^[Yy]$ ]]; then
+                sudo apt install -y dialog || { echo -e "${C_RED}Installation failed. Exiting.${C_RESET}"; exit 1; }
+                DIALOG_CMD="dialog"
+            else
+                echo "Cannot use TUI without dialog or whiptail. Exiting."
+                exit 1
+            fi
+        fi
+    fi
+}
+
+# =============================================================================
+# Argument parsing
+# =============================================================================
+
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --tui)        USE_TUI=true ;;
+            --dry-run)    DRY_RUN=true ;;
+            --yes)        SKIP_CONFIRM=true ;;
+            --no-common)  NO_COMMON=true ;;
+            --no-delete)  NO_DELETE=true ;;
+            --quiet)      QUIET=true ;;
+            --list)       LIST_ONLY=true ;;
+            --help)       SHOW_HELP=true ;;
+            --plugin=*)   SELECTED_PLUGINS+=("${1#--plugin=}") ;;
+            *)
+                echo -e "${C_RED}Unknown option: $1${C_RESET}"
+                echo "Use --help for usage information."
+                exit 1
+                ;;
+        esac
+        shift
+    done
+}
+
+# =============================================================================
+# Help
+# =============================================================================
+
+show_help() {
+    cat <<'HELP'
+Rsync Backup Manager
+====================
+
+A unified backup system using rsync with modular plugin-based configuration,
+colored preview, dry-run support, and an interactive TUI.
+
+USAGE
+    backup.sh [OPTIONS]
+
+OPTIONS
+    --tui               Launch interactive TUI menu (requires dialog or whiptail)
+    --dry-run           Run rsync in dry-run mode (no actual changes)
+    --yes               Skip confirmation prompt, execute immediately
+    --plugin=NAME       Run only the specified plugin (repeatable)
+                        Example: --plugin=firefox --plugin=ssh
+    --no-common         Skip common.conf paths
+    --no-delete         Override RSYNC_DELETE, do not delete from destination
+    --list              List all plugins and their ENABLED status, then exit
+    --quiet             Minimal output (summary only)
+    --help              Show this help message
+
+CONFIGURATION FORMAT
+    Global config (backup.conf):
+        DST=/media/manzolo/backup-drive
+        RSYNC_FLAGS="--archive --verbose --human-readable --progress --partial"
+        RSYNC_DELETE=yes
+        LOG_FILE=/path/to/backup.log
+
+    Path config (common.conf and plugins/*.conf):
+        Each PATH line defines a source directory/file to back up.
+        INCLUDE and EXCLUDE lines apply to the immediately preceding PATH.
+
+        PATH /home/user/.config
+        EXCLUDE cache/
+        PATH /home/user/.local
+        INCLUDE important/
+        EXCLUDE *
+
+    Plugin files also have an ENABLED=yes|no line at the top.
+
+INCLUDE/EXCLUDE RULES
+    Rules follow rsync's "first match wins" logic.
+    INCLUDE rules are placed before EXCLUDE rules in the rsync command.
+    For directory includes, the pattern/** variant is added automatically.
+
+    Example - back up only "important/" from a directory:
+        PATH /home/user/data
+        INCLUDE important/
+        EXCLUDE *
+    This generates: --include='important/' --include='important/**' --exclude='*'
+
+DELETE BEHAVIOR
+    When RSYNC_DELETE=yes (default), rsync uses --delete to create an exact
+    mirror. Files deleted from the source will also be deleted from the backup.
+    Use --no-delete to override this and keep old files on the destination.
+
+SUDO HANDLING
+    The script automatically detects paths that require elevated privileges:
+    - Paths outside $HOME (e.g., /etc, /opt)
+    - Paths inside $HOME that are not readable by the current user
+    These jobs run with sudo rsync. The preview shows [sudo] for such jobs.
+
+EXAMPLES
+    # Preview and run full backup (all enabled plugins + common paths):
+    backup.sh
+
+    # Dry-run to see what would be transferred:
+    backup.sh --dry-run
+
+    # Back up only Firefox and SSH, skip confirmation:
+    backup.sh --plugin=firefox --plugin=ssh --yes
+
+    # Launch the interactive TUI:
+    backup.sh --tui
+
+    # List all plugins:
+    backup.sh --list
+HELP
+}
+
+# =============================================================================
+# Configuration loading
+# =============================================================================
+
+load_global_config() {
+    if [[ ! -f "$GLOBAL_CONF" ]]; then
+        echo -e "${C_RED}Error: Global config not found: $GLOBAL_CONF${C_RESET}"
+        exit 1
+    fi
+    # Source the config (it's valid bash variable assignments)
+    # shellcheck source=/dev/null
+    source "$GLOBAL_CONF"
+
+    if [[ -z "$DST" ]]; then
+        echo -e "${C_RED}Error: DST is not set in $GLOBAL_CONF${C_RESET}"
+        exit 1
+    fi
+
+    # Append hostname to destination
+    DST="$DST/$(hostname)"
+}
+
+# Parse a conf file with PATH/INCLUDE/EXCLUDE format.
+# Populates ALL_JOBS array with entries: "source|includes|excludes|label"
+parse_conf_file() {
+    local file="$1"
+    local label="$2"
+    local current_path=""
+    local current_includes=""
+    local current_excludes=""
+
+    # Flush previous path entry
+    _flush_job() {
+        if [[ -n "$current_path" ]]; then
+            local needs_sudo="no"
+            if path_needs_sudo "$current_path"; then
+                needs_sudo="yes"
+            fi
+            local dest="$DST$current_path"
+            ALL_JOBS+=("${current_path}|${dest}|${current_includes}|${current_excludes}|${needs_sudo}|${label}")
+        fi
+    }
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        # Strip leading/trailing whitespace
+        line="$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+        # Skip comments and empty lines
+        [[ -z "$line" || "$line" == \#* ]] && continue
+        # Skip ENABLED line
+        [[ "$line" == ENABLED=* ]] && continue
+
+        if [[ "$line" == PATH\ * ]]; then
+            _flush_job
+            current_path="${line#PATH }"
+            current_includes=""
+            current_excludes=""
+        elif [[ "$line" == INCLUDE\ * ]]; then
+            local pattern="${line#INCLUDE }"
+            if [[ -n "$current_includes" ]]; then
+                current_includes="$current_includes|$pattern"
+            else
+                current_includes="$pattern"
+            fi
+        elif [[ "$line" == EXCLUDE\ * ]]; then
+            local pattern="${line#EXCLUDE }"
+            if [[ -n "$current_excludes" ]]; then
+                current_excludes="$current_excludes|$pattern"
+            else
+                current_excludes="$pattern"
+            fi
+        fi
+    done < "$file"
+    _flush_job
+
+    unset -f _flush_job
+}
+
+load_common() {
+    if [[ "$NO_COMMON" == true ]]; then
+        return
+    fi
+    if [[ -f "$COMMON_CONF" ]]; then
+        parse_conf_file "$COMMON_CONF" "common"
+    fi
+}
+
+# Get ENABLED status from a plugin conf file
+plugin_is_enabled() {
+    local file="$1"
+    local enabled
+    enabled=$(grep -m1 '^ENABLED=' "$file" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]')
+    [[ "$enabled" == "yes" ]]
+}
+
+# Get the description comment (first # line after ENABLED or first # line)
+plugin_description() {
+    local file="$1"
+    head -1 "$file" 2>/dev/null | sed 's/^#[[:space:]]*//'
+}
+
+load_plugins() {
+    local plugin_files=("$PLUGINS_DIR"/*.conf)
+    if [[ ! -e "${plugin_files[0]}" ]]; then
+        return
+    fi
+
+    for pfile in "${plugin_files[@]}"; do
+        local pname
+        pname="$(basename "$pfile" .conf)"
+
+        # If user specified --plugin=..., only load those
+        if [[ ${#SELECTED_PLUGINS[@]} -gt 0 ]]; then
+            local found=false
+            for sp in "${SELECTED_PLUGINS[@]}"; do
+                if [[ "$sp" == "$pname" ]]; then
+                    found=true
+                    break
+                fi
+            done
+            if [[ "$found" == false ]]; then
+                continue
+            fi
+        else
+            # Otherwise respect ENABLED flag
+            if ! plugin_is_enabled "$pfile"; then
+                continue
+            fi
+        fi
+
+        parse_conf_file "$pfile" "$pname"
+    done
+}
+
+# =============================================================================
+# Path validation and sudo detection
+# =============================================================================
+
+path_needs_sudo() {
+    local p="$1"
+    # Paths outside HOME need sudo
+    if [[ "$p" != "$HOME"* ]]; then
+        return 0
+    fi
+    # Existing but unreadable paths need sudo
+    if [[ -e "$p" && ! -r "$p" ]]; then
+        return 0
+    fi
+    return 1
+}
+
+validate_paths() {
+    local warn_count=0
+    for i in "${!ALL_JOBS[@]}"; do
+        local job="${ALL_JOBS[$i]}"
+        local src
+        src="$(echo "$job" | cut -d'|' -f1)"
+        if [[ ! -e "$src" ]]; then
+            if [[ "$QUIET" == false ]]; then
+                echo -e "${C_YELLOW}Warning: source path does not exist: $src${C_RESET}"
+            fi
+            ((warn_count++))
+        fi
+    done
+    if [[ $warn_count -gt 0 && "$QUIET" == false ]]; then
+        echo -e "${C_YELLOW}$warn_count path(s) not found. They will be skipped by rsync.${C_RESET}"
+        echo ""
+    fi
+}
+
+# =============================================================================
+# Rsync command building
+# =============================================================================
+
+build_rsync_args() {
+    local job="$1"
+    local src includes_str excludes_str needs_sudo
+    src="$(echo "$job" | cut -d'|' -f1)"
+    includes_str="$(echo "$job" | cut -d'|' -f3)"
+    excludes_str="$(echo "$job" | cut -d'|' -f4)"
+    needs_sudo="$(echo "$job" | cut -d'|' -f5)"
+
+    local dest="$DST$src"
+    local -a args=()
+
+    # Base flags (split into array)
+    # shellcheck disable=SC2086
+    read -ra flag_arr <<< "$RSYNC_FLAGS"
+    args+=("${flag_arr[@]}")
+
+    # Delete flag
+    if [[ "$RSYNC_DELETE" == "yes" && "$NO_DELETE" == false ]]; then
+        args+=("--delete")
+    fi
+
+    # Dry-run
+    if [[ "$DRY_RUN" == true ]]; then
+        args+=("--dry-run")
+    fi
+
+    # Include rules (must come before excludes - first match wins)
+    if [[ -n "$includes_str" ]]; then
+        IFS='|' read -ra inc_arr <<< "$includes_str"
+        for inc in "${inc_arr[@]}"; do
+            args+=("--include=$inc")
+            # For directory patterns, also include contents
+            if [[ "$inc" == */ ]]; then
+                args+=("--include=${inc}**")
+            fi
+        done
+    fi
+
+    # Exclude rules
+    if [[ -n "$excludes_str" ]]; then
+        IFS='|' read -ra exc_arr <<< "$excludes_str"
+        for exc in "${exc_arr[@]}"; do
+            args+=("--exclude=$exc")
+        done
+    fi
+
+    # Source must end with / for directory sync, or be a file
+    local rsync_src="$src"
+    if [[ -d "$src" ]]; then
+        rsync_src="${src%/}/"
+    fi
+
+    # Build the destination directory (parent of the target)
+    local rsync_dest
+    if [[ -d "$src" ]]; then
+        rsync_dest="${dest%/}/"
+    else
+        rsync_dest="$(dirname "$dest")/"
+    fi
+
+    # Prefix with sudo if needed
+    local prefix=""
+    if [[ "$needs_sudo" == "yes" ]]; then
+        prefix="sudo "
+    fi
+
+    echo "${prefix}rsync ${args[*]} ${rsync_src} ${rsync_dest}"
+}
+
+# =============================================================================
+# Preview
+# =============================================================================
+
+show_preview() {
+    local delete_active=false
+    if [[ "$RSYNC_DELETE" == "yes" && "$NO_DELETE" == false ]]; then
+        delete_active=true
+    fi
+
+    echo ""
+    echo -e "${C_BOLD}═══════════════════════════════════════════════════════════════${C_RESET}"
+    echo -e "${C_BOLD}  Rsync Backup Preview${C_RESET}"
+    echo -e "${C_BOLD}═══════════════════════════════════════════════════════════════${C_RESET}"
+    echo ""
+    echo -e "  Destination root: ${C_CYAN}$DST${C_RESET}"
+    if [[ "$DRY_RUN" == true ]]; then
+        echo -e "  Mode:             ${C_YELLOW}DRY-RUN (no changes will be made)${C_RESET}"
+    else
+        echo -e "  Mode:             ${C_GREEN}LIVE${C_RESET}"
+    fi
+    if [[ "$delete_active" == true ]]; then
+        echo -e "  Delete:           ${C_RED}--delete active (mirror mode)${C_RESET}"
+    else
+        echo -e "  Delete:           ${C_GREEN}disabled${C_RESET}"
+    fi
+    echo ""
+
+    local current_label=""
+    for job in "${ALL_JOBS[@]}"; do
+        local src includes_str excludes_str needs_sudo label
+        src="$(echo "$job" | cut -d'|' -f1)"
+        includes_str="$(echo "$job" | cut -d'|' -f3)"
+        excludes_str="$(echo "$job" | cut -d'|' -f4)"
+        needs_sudo="$(echo "$job" | cut -d'|' -f5)"
+        label="$(echo "$job" | cut -d'|' -f6)"
+
+        if [[ "$label" != "$current_label" ]]; then
+            current_label="$label"
+            echo -e "  ${C_BOLD}── [$label] ──${C_RESET}"
+        fi
+
+        local sudo_tag=""
+        if [[ "$needs_sudo" == "yes" ]]; then
+            sudo_tag="${C_YELLOW}[sudo] ${C_RESET}"
+        fi
+
+        echo -e "    ${sudo_tag}${C_GREEN}$src${C_RESET}"
+        echo -e "      → ${C_CYAN}$DST$src${C_RESET}"
+
+        if [[ -n "$includes_str" ]]; then
+            IFS='|' read -ra inc_arr <<< "$includes_str"
+            for inc in "${inc_arr[@]}"; do
+                echo -e "        ${C_MAGENTA}+ include: $inc${C_RESET}"
+            done
+        fi
+        if [[ -n "$excludes_str" ]]; then
+            IFS='|' read -ra exc_arr <<< "$excludes_str"
+            for exc in "${exc_arr[@]}"; do
+                echo -e "        ${C_YELLOW}- exclude: $exc${C_RESET}"
+            done
+        fi
+        if [[ ! -e "$src" ]]; then
+            echo -e "        ${C_YELLOW}(path does not exist - will be skipped)${C_RESET}"
+        fi
+    done
+
+    echo ""
+    echo -e "${C_BOLD}  Total jobs: ${#ALL_JOBS[@]}${C_RESET}"
+    echo -e "${C_BOLD}═══════════════════════════════════════════════════════════════${C_RESET}"
+    echo ""
+}
+
+# Generate plain-text preview (for TUI)
+generate_preview_text() {
+    local delete_active=false
+    if [[ "$RSYNC_DELETE" == "yes" && "$NO_DELETE" == false ]]; then
+        delete_active=true
+    fi
+
+    echo "==========================================================="
+    echo "  Rsync Backup Preview"
+    echo "==========================================================="
+    echo ""
+    echo "  Destination root: $DST"
+    if [[ "$DRY_RUN" == true ]]; then
+        echo "  Mode:             DRY-RUN (no changes will be made)"
+    else
+        echo "  Mode:             LIVE"
+    fi
+    if [[ "$delete_active" == true ]]; then
+        echo "  Delete:           --delete active (mirror mode)"
+    else
+        echo "  Delete:           disabled"
+    fi
+    echo ""
+
+    local current_label=""
+    for job in "${ALL_JOBS[@]}"; do
+        local src includes_str excludes_str needs_sudo label
+        src="$(echo "$job" | cut -d'|' -f1)"
+        includes_str="$(echo "$job" | cut -d'|' -f3)"
+        excludes_str="$(echo "$job" | cut -d'|' -f4)"
+        needs_sudo="$(echo "$job" | cut -d'|' -f5)"
+        label="$(echo "$job" | cut -d'|' -f6)"
+
+        if [[ "$label" != "$current_label" ]]; then
+            current_label="$label"
+            echo "  -- [$label] --"
+        fi
+
+        local sudo_tag=""
+        if [[ "$needs_sudo" == "yes" ]]; then
+            sudo_tag="[sudo] "
+        fi
+
+        echo "    ${sudo_tag}$src"
+        echo "      -> $DST$src"
+
+        if [[ -n "$includes_str" ]]; then
+            IFS='|' read -ra inc_arr <<< "$includes_str"
+            for inc in "${inc_arr[@]}"; do
+                echo "        + include: $inc"
+            done
+        fi
+        if [[ -n "$excludes_str" ]]; then
+            IFS='|' read -ra exc_arr <<< "$excludes_str"
+            for exc in "${exc_arr[@]}"; do
+                echo "        - exclude: $exc"
+            done
+        fi
+        if [[ ! -e "$src" ]]; then
+            echo "        (path does not exist - will be skipped)"
+        fi
+    done
+
+    echo ""
+    echo "  Total jobs: ${#ALL_JOBS[@]}"
+    echo "==========================================================="
+}
+
+# =============================================================================
+# Confirmation
+# =============================================================================
+
+confirm_execution() {
+    if [[ "$SKIP_CONFIRM" == true ]]; then
+        return 0
+    fi
+    read -rp "Proceed with backup? [y/N] " ans
+    if [[ ! "$ans" =~ ^[Yy]$ ]]; then
+        echo "Backup cancelled."
+        exit 0
+    fi
+}
+
+# =============================================================================
+# Backup execution
+# =============================================================================
+
+run_backup() {
+    START_TIME=$(date +%s)
+    TOTAL_FILES=0
+    TOTAL_ERRORS=0
+
+    local job_num=0
+    local total_jobs=${#ALL_JOBS[@]}
+
+    for job in "${ALL_JOBS[@]}"; do
+        ((job_num++))
+        local src label
+        src="$(echo "$job" | cut -d'|' -f1)"
+        label="$(echo "$job" | cut -d'|' -f6)"
+
+        if [[ "$QUIET" == false ]]; then
+            echo ""
+            echo -e "${C_BOLD}[$job_num/$total_jobs] Backing up: $src ($label)${C_RESET}"
+        fi
+
+        local cmd
+        cmd="$(build_rsync_args "$job")"
+
+        # Create destination directory
+        local dest_dir
+        if [[ -d "$src" ]]; then
+            dest_dir="$DST$src"
+        else
+            dest_dir="$(dirname "$DST$src")"
+        fi
+
+        local needs_sudo
+        needs_sudo="$(echo "$job" | cut -d'|' -f5)"
+        if [[ "$needs_sudo" == "yes" ]]; then
+            sudo mkdir -p "$dest_dir"
+        else
+            mkdir -p "$dest_dir"
+        fi
+
+        if [[ "$QUIET" == true ]]; then
+            if eval "$cmd" >> "${LOG_FILE:-/dev/null}" 2>&1; then
+                ((TOTAL_FILES++))
+            else
+                ((TOTAL_ERRORS++))
+            fi
+        else
+            if eval "$cmd" 2>&1 | tee -a "${LOG_FILE:-/dev/null}"; then
+                ((TOTAL_FILES++))
+            else
+                ((TOTAL_ERRORS++))
+                echo -e "${C_RED}Error backing up: $src${C_RESET}"
+            fi
+        fi
+    done
+}
+
+print_summary() {
+    local end_time
+    end_time=$(date +%s)
+    local elapsed=$((end_time - START_TIME))
+    local mins=$((elapsed / 60))
+    local secs=$((elapsed % 60))
+
+    echo ""
+    echo -e "${C_BOLD}═══════════════════════════════════════════════════════════════${C_RESET}"
+    echo -e "${C_BOLD}  Backup Summary${C_RESET}"
+    echo -e "${C_BOLD}═══════════════════════════════════════════════════════════════${C_RESET}"
+    echo -e "  Jobs completed:  ${C_GREEN}$TOTAL_FILES${C_RESET}"
+    echo -e "  Jobs with errors: ${C_RED}$TOTAL_ERRORS${C_RESET}"
+    echo -e "  Elapsed time:    ${mins}m ${secs}s"
+    if [[ -n "${LOG_FILE:-}" && "$LOG_FILE" != "" ]]; then
+        echo -e "  Log file:        ${C_CYAN}$LOG_FILE${C_RESET}"
+    fi
+    if [[ "$DRY_RUN" == true ]]; then
+        echo -e "  ${C_YELLOW}(dry-run mode - no actual changes were made)${C_RESET}"
+    fi
+    echo -e "${C_BOLD}═══════════════════════════════════════════════════════════════${C_RESET}"
+}
+
+# =============================================================================
+# Plugin listing
+# =============================================================================
+
+list_plugins() {
+    echo -e "${C_BOLD}Available plugins:${C_RESET}"
+    echo ""
+
+    local plugin_files=("$PLUGINS_DIR"/*.conf)
+    if [[ ! -e "${plugin_files[0]}" ]]; then
+        echo "  (no plugins found in $PLUGINS_DIR)"
+        return
+    fi
+
+    for pfile in "${plugin_files[@]}"; do
+        local pname desc enabled_str status_color
+        pname="$(basename "$pfile" .conf)"
+        desc="$(plugin_description "$pfile")"
+
+        if plugin_is_enabled "$pfile"; then
+            enabled_str="enabled"
+            status_color="$C_GREEN"
+        else
+            enabled_str="disabled"
+            status_color="$C_YELLOW"
+        fi
+
+        printf "  %-18s ${status_color}%-8s${C_RESET}  %s\n" "$pname" "$enabled_str" "$desc"
+    done
+    echo ""
+}
+
+# =============================================================================
+# TUI functions
+# =============================================================================
+
+detect_dialog() {
+    if command -v dialog &>/dev/null; then
+        DIALOG_CMD="dialog"
+    elif command -v whiptail &>/dev/null; then
+        DIALOG_CMD="whiptail"
+    else
+        DIALOG_CMD=""
+    fi
+}
+
+tui_main_menu() {
+    while true; do
+        local choice
+        if [[ "$DIALOG_CMD" == "dialog" ]]; then
+            choice=$($DIALOG_CMD --clear --title "Rsync Backup Manager" \
+                --menu "Select an action:" 18 50 8 \
+                1 "Run backup" \
+                2 "Run backup (dry-run)" \
+                3 "Select plugins" \
+                4 "Edit backup.conf" \
+                5 "Edit common.conf" \
+                6 "Edit plugin config" \
+                7 "Show preview" \
+                8 "Exit" \
+                3>&1 1>&2 2>&3) || break
+        else
+            choice=$($DIALOG_CMD --title "Rsync Backup Manager" \
+                --menu "Select an action:" 18 50 8 \
+                1 "Run backup" \
+                2 "Run backup (dry-run)" \
+                3 "Select plugins" \
+                4 "Edit backup.conf" \
+                5 "Edit common.conf" \
+                6 "Edit plugin config" \
+                7 "Show preview" \
+                8 "Exit" \
+                3>&1 1>&2 2>&3) || break
+        fi
+
+        case "$choice" in
+            1) tui_run_backup false ;;
+            2) tui_run_backup true ;;
+            3) tui_select_plugins ;;
+            4) tui_edit_file "$GLOBAL_CONF" ;;
+            5) tui_edit_file "$COMMON_CONF" ;;
+            6) tui_choose_plugin_file ;;
+            7) tui_show_preview ;;
+            8) break ;;
+        esac
+    done
+    clear
+}
+
+tui_select_plugins() {
+    local plugin_files=("$PLUGINS_DIR"/*.conf)
+    if [[ ! -e "${plugin_files[0]}" ]]; then
+        $DIALOG_CMD --title "Error" --msgbox "No plugins found in $PLUGINS_DIR" 8 50
+        return
+    fi
+
+    # Build checklist args
+    local -a cl_args=()
+    for pfile in "${plugin_files[@]}"; do
+        local pname desc status
+        pname="$(basename "$pfile" .conf)"
+        desc="$(plugin_description "$pfile")"
+
+        # Check if in SELECTED_PLUGINS override, or use file ENABLED status
+        if [[ ${#SELECTED_PLUGINS[@]} -gt 0 ]]; then
+            status="off"
+            for sp in "${SELECTED_PLUGINS[@]}"; do
+                if [[ "$sp" == "$pname" ]]; then
+                    status="on"
+                    break
+                fi
+            done
+        else
+            if plugin_is_enabled "$pfile"; then
+                status="on"
+            else
+                status="off"
+            fi
+        fi
+
+        cl_args+=("$pname" "$desc" "$status")
+    done
+
+    local result
+    if [[ "$DIALOG_CMD" == "dialog" ]]; then
+        result=$($DIALOG_CMD --clear --title "Plugin Selection" \
+            --checklist "Select plugins to include in backup:" 20 60 10 \
+            "${cl_args[@]}" \
+            3>&1 1>&2 2>&3) || return
+    else
+        result=$($DIALOG_CMD --title "Plugin Selection" \
+            --checklist "Select plugins to include in backup:" 20 60 10 \
+            "${cl_args[@]}" \
+            3>&1 1>&2 2>&3) || return
+    fi
+
+    # Parse selected plugins (dialog returns "item1" "item2" ...)
+    SELECTED_PLUGINS=()
+    # Remove quotes from dialog output
+    result="${result//\"/}"
+    for p in $result; do
+        SELECTED_PLUGINS+=("$p")
+    done
+
+    # Ask whether to save to conf files or use temporarily
+    local save_choice
+    if [[ "$DIALOG_CMD" == "dialog" ]]; then
+        save_choice=$($DIALOG_CMD --clear --title "Save Selection" \
+            --menu "How to apply this selection?" 12 50 2 \
+            1 "Save to conf files (permanent)" \
+            2 "Temporary only (this session)" \
+            3>&1 1>&2 2>&3) || return
+    else
+        save_choice=$($DIALOG_CMD --title "Save Selection" \
+            --menu "How to apply this selection?" 12 50 2 \
+            1 "Save to conf files (permanent)" \
+            2 "Temporary only (this session)" \
+            3>&1 1>&2 2>&3) || return
+    fi
+
+    if [[ "$save_choice" == "1" ]]; then
+        # Save enabled/disabled status to each plugin conf
+        for pfile in "${plugin_files[@]}"; do
+            local pname
+            pname="$(basename "$pfile" .conf)"
+            local new_status="no"
+            for sp in "${SELECTED_PLUGINS[@]}"; do
+                if [[ "$sp" == "$pname" ]]; then
+                    new_status="yes"
+                    break
+                fi
+            done
+            # Update ENABLED line in plugin conf
+            sed -i "s/^ENABLED=.*/ENABLED=$new_status/" "$pfile"
+        done
+        $DIALOG_CMD --title "Saved" --msgbox "Plugin selection saved to config files." 8 50
+        # Clear SELECTED_PLUGINS so load_plugins uses the file ENABLED status
+        SELECTED_PLUGINS=()
+    fi
+}
+
+tui_edit_file() {
+    local file="$1"
+    local editor="${EDITOR:-nano}"
+    clear
+    "$editor" "$file"
+}
+
+tui_choose_plugin_file() {
+    local plugin_files=("$PLUGINS_DIR"/*.conf)
+    if [[ ! -e "${plugin_files[0]}" ]]; then
+        $DIALOG_CMD --title "Error" --msgbox "No plugins found in $PLUGINS_DIR" 8 50
+        return
+    fi
+
+    local -a menu_args=()
+    local idx=1
+    for pfile in "${plugin_files[@]}"; do
+        local pname desc
+        pname="$(basename "$pfile" .conf)"
+        desc="$(plugin_description "$pfile")"
+        menu_args+=("$pname" "$desc")
+        ((idx++))
+    done
+
+    local choice
+    if [[ "$DIALOG_CMD" == "dialog" ]]; then
+        choice=$($DIALOG_CMD --clear --title "Edit Plugin Config" \
+            --menu "Select plugin to edit:" 18 60 10 \
+            "${menu_args[@]}" \
+            3>&1 1>&2 2>&3) || return
+    else
+        choice=$($DIALOG_CMD --title "Edit Plugin Config" \
+            --menu "Select plugin to edit:" 18 60 10 \
+            "${menu_args[@]}" \
+            3>&1 1>&2 2>&3) || return
+    fi
+
+    tui_edit_file "$PLUGINS_DIR/$choice.conf"
+}
+
+tui_run_backup() {
+    local is_dry_run="$1"
+
+    # Reload jobs
+    ALL_JOBS=()
+    load_common
+    load_plugins
+
+    if [[ ${#ALL_JOBS[@]} -eq 0 ]]; then
+        $DIALOG_CMD --title "No Jobs" --msgbox "No backup jobs configured." 8 50
+        return
+    fi
+
+    # Show preview and ask for confirmation
+    local preview_text
+    preview_text="$(generate_preview_text)"
+
+    if [[ "$DIALOG_CMD" == "dialog" ]]; then
+        $DIALOG_CMD --title "Backup Preview" --yesno "$preview_text\n\nProceed with backup?" 30 70 || return
+    else
+        $DIALOG_CMD --title "Backup Preview" --yesno "$preview_text\n\nProceed with backup?" 30 70 || return
+    fi
+
+    # Set dry-run flag
+    if [[ "$is_dry_run" == true ]]; then
+        DRY_RUN=true
+    else
+        DRY_RUN=false
+    fi
+
+    # Execute backup with output shown in a dialog window
+    local tmpfile
+    tmpfile=$(mktemp /tmp/backup-output.XXXXXX)
+
+    (
+        for job in "${ALL_JOBS[@]}"; do
+            local src label
+            src="$(echo "$job" | cut -d'|' -f1)"
+            label="$(echo "$job" | cut -d'|' -f6)"
+            echo "=== Backing up: $src ($label) ==="
+
+            local cmd
+            cmd="$(build_rsync_args "$job")"
+
+            local dest_dir needs_sudo
+            needs_sudo="$(echo "$job" | cut -d'|' -f5)"
+            if [[ -d "$src" ]]; then
+                dest_dir="$DST$src"
+            else
+                dest_dir="$(dirname "$DST$src")"
+            fi
+
+            if [[ "$needs_sudo" == "yes" ]]; then
+                sudo mkdir -p "$dest_dir" 2>/dev/null || true
+            else
+                mkdir -p "$dest_dir" 2>/dev/null || true
+            fi
+
+            eval "$cmd" 2>&1 || echo "ERROR: Failed to back up $src"
+            echo ""
+        done
+        echo "=== Backup complete ==="
+    ) 2>&1 | if [[ "$DIALOG_CMD" == "dialog" ]]; then
+        $DIALOG_CMD --title "Backup Progress" --programbox 30 80
+    else
+        # whiptail doesn't have programbox, use a temp file approach
+        tee "$tmpfile"
+        $DIALOG_CMD --title "Backup Output" --textbox "$tmpfile" 30 80
+    fi
+
+    rm -f "$tmpfile"
+}
+
+tui_show_preview() {
+    # Reload jobs
+    ALL_JOBS=()
+    load_common
+    load_plugins
+
+    if [[ ${#ALL_JOBS[@]} -eq 0 ]]; then
+        $DIALOG_CMD --title "No Jobs" --msgbox "No backup jobs configured." 8 50
+        return
+    fi
+
+    local preview_text
+    preview_text="$(generate_preview_text)"
+
+    if [[ "$DIALOG_CMD" == "dialog" ]]; then
+        $DIALOG_CMD --title "Backup Preview" --msgbox "$preview_text" 30 70
+    else
+        # whiptail: write to temp file and use textbox
+        local tmpfile
+        tmpfile=$(mktemp /tmp/backup-preview.XXXXXX)
+        echo "$preview_text" > "$tmpfile"
+        $DIALOG_CMD --title "Backup Preview" --textbox "$tmpfile" 30 70
+        rm -f "$tmpfile"
+    fi
+}
+
+# =============================================================================
+# Main
+# =============================================================================
+
+main() {
+    parse_args "$@"
+
+    if [[ "$SHOW_HELP" == true ]]; then
+        show_help
+        exit 0
+    fi
+
+    load_global_config
+    check_dependencies
+
+    if [[ "$LIST_ONLY" == true ]]; then
+        list_plugins
+        exit 0
+    fi
+
+    # TUI mode
+    if [[ "$USE_TUI" == true ]]; then
+        tui_main_menu
+        exit 0
+    fi
+
+    # CLI mode: load all jobs
+    ALL_JOBS=()
+    load_common
+    load_plugins
+
+    if [[ ${#ALL_JOBS[@]} -eq 0 ]]; then
+        echo -e "${C_YELLOW}No backup jobs configured. Check common.conf and plugins.${C_RESET}"
+        exit 0
+    fi
+
+    validate_paths
+
+    if [[ "$QUIET" == false ]]; then
+        show_preview
+    fi
+
+    confirm_execution
+    run_backup
+    print_summary
+}
+
+main "$@"
