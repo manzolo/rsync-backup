@@ -31,7 +31,8 @@ LIST_ONLY=false
 SHOW_HELP=false
 declare -a SELECTED_PLUGINS=()
 declare -a ALL_JOBS=()     # "source|dest|includes|excludes|needs_sudo|label"
-declare -a RESTORE_CMDS=()  # "plugin_label${FS}command" entries
+declare -a RESTORE_CMDS=()      # "plugin_label${FS}command" entries (RESTORE_CMD)
+declare -a PRE_RESTORE_CMDS=()  # "plugin_label${FS}command" entries (PRE_RESTORE_CMD)
 DIALOG_CMD=""
 TOTAL_FILES=0
 TOTAL_ERRORS=0
@@ -218,6 +219,8 @@ parse_conf_file() {
         [[ "$line" == PRE_CMD\ * ]] && continue
         # Skip RESTORE_CMD line (collected separately by collect_restore_commands)
         [[ "$line" == RESTORE_CMD\ * ]] && continue
+        # Skip PRE_RESTORE_CMD line (collected separately by collect_pre_restore_commands)
+        [[ "$line" == PRE_RESTORE_CMD\ * ]] && continue
 
         if [[ "$line" == PATH\ * ]]; then
             _flush_job
@@ -236,6 +239,13 @@ parse_conf_file() {
             fi
         elif [[ "$line" == EXCLUDE\ * ]]; then
             local pattern="${line#EXCLUDE }"
+            if [[ -n "$current_excludes" ]]; then
+                current_excludes="$current_excludes|$pattern"
+            else
+                current_excludes="$pattern"
+            fi
+        elif [[ "$line" == RESTORE_EXCLUDE\ * ]]; then
+            local pattern="${line#RESTORE_EXCLUDE }"
             if [[ -n "$current_excludes" ]]; then
                 current_excludes="$current_excludes|$pattern"
             else
@@ -343,6 +353,46 @@ collect_restore_commands() {
                 local cmd="${line#RESTORE_CMD }"
                 cmd="${cmd//\$HOME/$HOME}"
                 RESTORE_CMDS+=("${plugin_label}${FS}${cmd}")
+            fi
+        done < "$cfile"
+    done
+}
+
+collect_pre_restore_commands() {
+    PRE_RESTORE_CMDS=()
+
+    local -a conf_files=()
+    if [[ "$NO_COMMON" != true && -f "$COMMON_CONF" ]]; then
+        conf_files+=("$COMMON_CONF")
+    fi
+
+    local plugin_files=("$PLUGINS_DIR"/*.conf)
+    if [[ -e "${plugin_files[0]}" ]]; then
+        for pfile in "${plugin_files[@]}"; do
+            local pname
+            pname="$(basename "$pfile" .conf)"
+            if [[ ${#SELECTED_PLUGINS[@]} -gt 0 ]]; then
+                local found=false
+                for sp in "${SELECTED_PLUGINS[@]}"; do
+                    [[ "$sp" == "$pname" ]] && found=true && break
+                done
+                [[ "$found" == false ]] && continue
+            else
+                plugin_is_enabled "$pfile" || continue
+            fi
+            conf_files+=("$pfile")
+        done
+    fi
+
+    for cfile in "${conf_files[@]}"; do
+        local plugin_label
+        plugin_label="$(basename "$cfile" .conf)"
+        while IFS= read -r line; do
+            line="$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+            if [[ "$line" == PRE_RESTORE_CMD\ * ]]; then
+                local cmd="${line#PRE_RESTORE_CMD }"
+                cmd="${cmd//\$HOME/$HOME}"
+                PRE_RESTORE_CMDS+=("${plugin_label}${FS}${cmd}")
             fi
         done < "$cfile"
     done
@@ -769,6 +819,46 @@ print_summary() {
 }
 
 # =============================================================================
+# Pre-restore command execution (hardware-specific prompts, run before rsync)
+# =============================================================================
+
+run_pre_restore_commands() {
+    if [[ ${#PRE_RESTORE_CMDS[@]} -eq 0 ]]; then
+        return
+    fi
+
+    echo ""
+    echo -e "${C_BOLD}═══════════════════════════════════════════════════════════════${C_RESET}"
+    echo -e "${C_BOLD}  Pre-restore Configuration${C_RESET}"
+    echo -e "${C_BOLD}═══════════════════════════════════════════════════════════════${C_RESET}"
+
+    # Collect unique plugin labels preserving order
+    local -a seen_labels=()
+    for entry in "${PRE_RESTORE_CMDS[@]}"; do
+        local label="${entry%%$'\x1e'*}"
+        local already_seen=false
+        for s in "${seen_labels[@]}"; do
+            [[ "$s" == "$label" ]] && already_seen=true && break
+        done
+        [[ "$already_seen" == false ]] && seen_labels+=("$label")
+    done
+
+    for label in "${seen_labels[@]}"; do
+        echo ""
+        echo -e "  ${C_BOLD}── [$label] ──${C_RESET}"
+        for entry in "${PRE_RESTORE_CMDS[@]}"; do
+            local entry_label="${entry%%$'\x1e'*}"
+            local entry_cmd="${entry#*$'\x1e'}"
+            [[ "$entry_label" != "$label" ]] && continue
+            eval "$entry_cmd" || echo -e "${C_YELLOW}Warning: pre-restore command failed${C_RESET}"
+        done
+    done
+
+    echo ""
+    echo -e "${C_BOLD}═══════════════════════════════════════════════════════════════${C_RESET}"
+}
+
+# =============================================================================
 # Post-restore command execution
 # =============================================================================
 
@@ -779,7 +869,7 @@ run_restore_commands() {
 
     echo ""
     echo -e "${C_BOLD}═══════════════════════════════════════════════════════════════${C_RESET}"
-    echo -e "${C_BOLD}  Package Reinstall${C_RESET}"
+    echo -e "${C_BOLD}  Post-restore Actions${C_RESET}"
     echo -e "${C_BOLD}═══════════════════════════════════════════════════════════════${C_RESET}"
 
     # Collect unique plugin labels preserving order
@@ -1047,6 +1137,7 @@ tui_run_restore() {
     ALL_JOBS=()
     load_common
     load_plugins
+    collect_pre_restore_commands
     collect_restore_commands
 
     # Restore saved state
@@ -1080,6 +1171,7 @@ tui_run_restore() {
     clear
     show_preview
     sudo_preauth
+    run_pre_restore_commands
     run_restore
     sudo_keepalive_stop
     print_summary
@@ -1137,6 +1229,7 @@ main() {
     ALL_JOBS=()
     load_common
     load_plugins
+    collect_pre_restore_commands
     collect_restore_commands
 
     if [[ ${#ALL_JOBS[@]} -eq 0 ]]; then
@@ -1151,6 +1244,7 @@ main() {
     confirm_execution
     sudo_preauth
     validate_paths
+    run_pre_restore_commands
     run_restore
     sudo_keepalive_stop
     print_summary

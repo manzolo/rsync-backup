@@ -239,8 +239,10 @@ parse_conf_file() {
         [[ "$line" == ENABLED=* ]] && continue
         # Skip PRE_CMD line (handled separately)
         [[ "$line" == PRE_CMD\ * ]] && continue
-        # Skip RESTORE_CMD line (only meaningful for restore.sh)
+        # Skip RESTORE_CMD/RESTORE_EXCLUDE/PRE_RESTORE_CMD (only meaningful for restore.sh)
         [[ "$line" == RESTORE_CMD\ * ]] && continue
+        [[ "$line" == RESTORE_EXCLUDE\ * ]] && continue
+        [[ "$line" == PRE_RESTORE_CMD\ * ]] && continue
 
         if [[ "$line" == PATH\ * ]]; then
             _flush_job
