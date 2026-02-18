@@ -18,6 +18,9 @@ C_MAGENTA='\033[0;35m'
 C_CYAN='\033[0;36m'
 C_BOLD='\033[1m'
 
+# --- Field separator for job entries (ASCII Record Separator) ---
+FS=$'\x1e'
+
 # --- Global state ---
 DRY_RUN=false
 SKIP_CONFIRM=false
@@ -223,7 +226,7 @@ parse_conf_file() {
                 needs_sudo="yes"
             fi
             local dest="$DST$current_path"
-            ALL_JOBS+=("${current_path}|${dest}|${current_includes}|${current_excludes}|${needs_sudo}|${label}")
+            ALL_JOBS+=("${current_path}${FS}${dest}${FS}${current_includes}${FS}${current_excludes}${FS}${needs_sudo}${FS}${label}")
         fi
     }
 
@@ -342,12 +345,21 @@ validate_paths() {
     for i in "${!ALL_JOBS[@]}"; do
         local job="${ALL_JOBS[$i]}"
         local src
-        src="$(echo "$job" | cut -d'|' -f1)"
-        if [[ ! -e "$src" ]]; then
+        src="$(echo "$job" | cut -d"$FS" -f1)"
+        # Use compgen to handle glob patterns in paths
+        if [[ "$src" == *[\*\?]* ]]; then
+            # Path contains glob characters - check if any match exists
+            if ! compgen -G "$src" >/dev/null 2>&1; then
+                if [[ "$QUIET" == false ]]; then
+                    echo -e "${C_YELLOW}Warning: no match for pattern: $src${C_RESET}"
+                fi
+                warn_count=$((warn_count + 1))
+            fi
+        elif [[ ! -e "$src" ]]; then
             if [[ "$QUIET" == false ]]; then
                 echo -e "${C_YELLOW}Warning: source path does not exist: $src${C_RESET}"
             fi
-            ((warn_count++))
+            warn_count=$((warn_count + 1))
         fi
     done
     if [[ $warn_count -gt 0 && "$QUIET" == false ]]; then
@@ -363,10 +375,10 @@ validate_paths() {
 build_rsync_args() {
     local job="$1"
     local src includes_str excludes_str needs_sudo
-    src="$(echo "$job" | cut -d'|' -f1)"
-    includes_str="$(echo "$job" | cut -d'|' -f3)"
-    excludes_str="$(echo "$job" | cut -d'|' -f4)"
-    needs_sudo="$(echo "$job" | cut -d'|' -f5)"
+    src="$(echo "$job" | cut -d"$FS" -f1)"
+    includes_str="$(echo "$job" | cut -d"$FS" -f3)"
+    excludes_str="$(echo "$job" | cut -d"$FS" -f4)"
+    needs_sudo="$(echo "$job" | cut -d"$FS" -f5)"
 
     local dest="$DST$src"
     local -a args=()
@@ -460,11 +472,11 @@ show_preview() {
     local current_label=""
     for job in "${ALL_JOBS[@]}"; do
         local src includes_str excludes_str needs_sudo label
-        src="$(echo "$job" | cut -d'|' -f1)"
-        includes_str="$(echo "$job" | cut -d'|' -f3)"
-        excludes_str="$(echo "$job" | cut -d'|' -f4)"
-        needs_sudo="$(echo "$job" | cut -d'|' -f5)"
-        label="$(echo "$job" | cut -d'|' -f6)"
+        src="$(echo "$job" | cut -d"$FS" -f1)"
+        includes_str="$(echo "$job" | cut -d"$FS" -f3)"
+        excludes_str="$(echo "$job" | cut -d"$FS" -f4)"
+        needs_sudo="$(echo "$job" | cut -d"$FS" -f5)"
+        label="$(echo "$job" | cut -d"$FS" -f6)"
 
         if [[ "$label" != "$current_label" ]]; then
             current_label="$label"
@@ -529,11 +541,11 @@ generate_preview_text() {
     local current_label=""
     for job in "${ALL_JOBS[@]}"; do
         local src includes_str excludes_str needs_sudo label
-        src="$(echo "$job" | cut -d'|' -f1)"
-        includes_str="$(echo "$job" | cut -d'|' -f3)"
-        excludes_str="$(echo "$job" | cut -d'|' -f4)"
-        needs_sudo="$(echo "$job" | cut -d'|' -f5)"
-        label="$(echo "$job" | cut -d'|' -f6)"
+        src="$(echo "$job" | cut -d"$FS" -f1)"
+        includes_str="$(echo "$job" | cut -d"$FS" -f3)"
+        excludes_str="$(echo "$job" | cut -d"$FS" -f4)"
+        needs_sudo="$(echo "$job" | cut -d"$FS" -f5)"
+        label="$(echo "$job" | cut -d"$FS" -f6)"
 
         if [[ "$label" != "$current_label" ]]; then
             current_label="$label"
@@ -598,10 +610,25 @@ run_backup() {
     local total_jobs=${#ALL_JOBS[@]}
 
     for job in "${ALL_JOBS[@]}"; do
-        ((job_num++))
+        job_num=$((job_num + 1))
         local src label
-        src="$(echo "$job" | cut -d'|' -f1)"
-        label="$(echo "$job" | cut -d'|' -f6)"
+        src="$(echo "$job" | cut -d"$FS" -f1)"
+        label="$(echo "$job" | cut -d"$FS" -f6)"
+
+        # Skip non-existent paths (glob-aware)
+        local path_exists=true
+        if [[ "$src" == *[\*\?]* ]]; then
+            compgen -G "$src" >/dev/null 2>&1 || path_exists=false
+        elif [[ ! -e "$src" ]]; then
+            path_exists=false
+        fi
+        if [[ "$path_exists" == false ]]; then
+            if [[ "$QUIET" == false ]]; then
+                echo ""
+                echo -e "${C_YELLOW}[$job_num/$total_jobs] Skipping (not found): $src ($label)${C_RESET}"
+            fi
+            continue
+        fi
 
         if [[ "$QUIET" == false ]]; then
             echo ""
@@ -620,7 +647,7 @@ run_backup() {
         fi
 
         local needs_sudo
-        needs_sudo="$(echo "$job" | cut -d'|' -f5)"
+        needs_sudo="$(echo "$job" | cut -d"$FS" -f5)"
         if [[ "$needs_sudo" == "yes" ]]; then
             sudo mkdir -p "$dest_dir"
         else
@@ -629,15 +656,15 @@ run_backup() {
 
         if [[ "$QUIET" == true ]]; then
             if eval "$cmd" >> "${LOG_FILE:-/dev/null}" 2>&1; then
-                ((TOTAL_FILES++))
+                TOTAL_FILES=$((TOTAL_FILES + 1))
             else
-                ((TOTAL_ERRORS++))
+                TOTAL_ERRORS=$((TOTAL_ERRORS + 1))
             fi
         else
             if eval "$cmd" 2>&1 | tee -a "${LOG_FILE:-/dev/null}"; then
-                ((TOTAL_FILES++))
+                TOTAL_FILES=$((TOTAL_FILES + 1))
             else
-                ((TOTAL_ERRORS++))
+                TOTAL_ERRORS=$((TOTAL_ERRORS + 1))
                 echo -e "${C_RED}Error backing up: $src${C_RESET}"
             fi
         fi
@@ -869,7 +896,7 @@ tui_choose_plugin_file() {
         pname="$(basename "$pfile" .conf)"
         desc="$(plugin_description "$pfile")"
         menu_args+=("$pname" "$desc")
-        ((idx++))
+        idx=$((idx + 1))
     done
 
     local choice
@@ -918,47 +945,14 @@ tui_run_backup() {
         DRY_RUN=false
     fi
 
-    # Execute backup with output shown in a dialog window
-    local tmpfile
-    tmpfile=$(mktemp /tmp/backup-output.XXXXXX)
+    # Drop to shell for backup execution
+    clear
+    show_preview
+    run_backup
+    print_summary
 
-    (
-        for job in "${ALL_JOBS[@]}"; do
-            local src label
-            src="$(echo "$job" | cut -d'|' -f1)"
-            label="$(echo "$job" | cut -d'|' -f6)"
-            echo "=== Backing up: $src ($label) ==="
-
-            local cmd
-            cmd="$(build_rsync_args "$job")"
-
-            local dest_dir needs_sudo
-            needs_sudo="$(echo "$job" | cut -d'|' -f5)"
-            if [[ -d "$src" ]]; then
-                dest_dir="$DST$src"
-            else
-                dest_dir="$(dirname "$DST$src")"
-            fi
-
-            if [[ "$needs_sudo" == "yes" ]]; then
-                sudo mkdir -p "$dest_dir" 2>/dev/null || true
-            else
-                mkdir -p "$dest_dir" 2>/dev/null || true
-            fi
-
-            eval "$cmd" 2>&1 || echo "ERROR: Failed to back up $src"
-            echo ""
-        done
-        echo "=== Backup complete ==="
-    ) 2>&1 | if [[ "$DIALOG_CMD" == "dialog" ]]; then
-        $DIALOG_CMD --title "Backup Progress" --programbox 30 80
-    else
-        # whiptail doesn't have programbox, use a temp file approach
-        tee "$tmpfile"
-        $DIALOG_CMD --title "Backup Output" --textbox "$tmpfile" 30 80
-    fi
-
-    rm -f "$tmpfile"
+    echo ""
+    read -rp "Press Enter to return to the menu..."
 }
 
 tui_show_preview() {
@@ -972,19 +966,11 @@ tui_show_preview() {
         return
     fi
 
-    local preview_text
-    preview_text="$(generate_preview_text)"
+    clear
+    show_preview
 
-    if [[ "$DIALOG_CMD" == "dialog" ]]; then
-        $DIALOG_CMD --title "Backup Preview" --msgbox "$preview_text" 30 70
-    else
-        # whiptail: write to temp file and use textbox
-        local tmpfile
-        tmpfile=$(mktemp /tmp/backup-preview.XXXXXX)
-        echo "$preview_text" > "$tmpfile"
-        $DIALOG_CMD --title "Backup Preview" --textbox "$tmpfile" 30 70
-        rm -f "$tmpfile"
-    fi
+    echo ""
+    read -rp "Press Enter to return to the menu..."
 }
 
 # =============================================================================
