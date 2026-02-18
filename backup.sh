@@ -817,13 +817,13 @@ tui_main_menu() {
         fi
 
         case "$choice" in
-            1) tui_run_backup false ;;
-            2) tui_run_backup true ;;
-            3) tui_select_plugins ;;
-            4) tui_edit_file "$GLOBAL_CONF" ;;
-            5) tui_edit_file "$COMMON_CONF" ;;
-            6) tui_choose_plugin_file ;;
-            7) tui_show_preview ;;
+            1) tui_run_backup false || true ;;
+            2) tui_run_backup true || true ;;
+            3) tui_select_plugins || true ;;
+            4) tui_edit_file "$GLOBAL_CONF" || true ;;
+            5) tui_edit_file "$COMMON_CONF" || true ;;
+            6) tui_choose_plugin_file || true ;;
+            7) tui_show_preview || true ;;
             8) break ;;
         esac
     done
