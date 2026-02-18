@@ -31,6 +31,7 @@ LIST_ONLY=false
 SHOW_HELP=false
 declare -a SELECTED_PLUGINS=()
 declare -a ALL_JOBS=()     # "source|dest|includes|excludes|needs_sudo|label"
+declare -a RESTORE_CMDS=()  # "plugin_label${FS}command" entries
 DIALOG_CMD=""
 TOTAL_FILES=0
 TOTAL_ERRORS=0
@@ -215,6 +216,8 @@ parse_conf_file() {
         [[ "$line" == ENABLED=* ]] && continue
         # Skip PRE_CMD line (not relevant for restore)
         [[ "$line" == PRE_CMD\ * ]] && continue
+        # Skip RESTORE_CMD line (collected separately by collect_restore_commands)
+        [[ "$line" == RESTORE_CMD\ * ]] && continue
 
         if [[ "$line" == PATH\ * ]]; then
             _flush_job
@@ -302,6 +305,50 @@ load_plugins() {
 }
 
 # =============================================================================
+# Restore command collection
+# =============================================================================
+
+collect_restore_commands() {
+    RESTORE_CMDS=()
+
+    local -a conf_files=()
+    if [[ "$NO_COMMON" != true && -f "$COMMON_CONF" ]]; then
+        conf_files+=("$COMMON_CONF")
+    fi
+
+    local plugin_files=("$PLUGINS_DIR"/*.conf)
+    if [[ -e "${plugin_files[0]}" ]]; then
+        for pfile in "${plugin_files[@]}"; do
+            local pname
+            pname="$(basename "$pfile" .conf)"
+            if [[ ${#SELECTED_PLUGINS[@]} -gt 0 ]]; then
+                local found=false
+                for sp in "${SELECTED_PLUGINS[@]}"; do
+                    [[ "$sp" == "$pname" ]] && found=true && break
+                done
+                [[ "$found" == false ]] && continue
+            else
+                plugin_is_enabled "$pfile" || continue
+            fi
+            conf_files+=("$pfile")
+        done
+    fi
+
+    for cfile in "${conf_files[@]}"; do
+        local plugin_label
+        plugin_label="$(basename "$cfile" .conf)"
+        while IFS= read -r line; do
+            line="$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+            if [[ "$line" == RESTORE_CMD\ * ]]; then
+                local cmd="${line#RESTORE_CMD }"
+                cmd="${cmd//\$HOME/$HOME}"
+                RESTORE_CMDS+=("${plugin_label}${FS}${cmd}")
+            fi
+        done < "$cfile"
+    done
+}
+
+# =============================================================================
 # Sudo pre-authentication
 # =============================================================================
 
@@ -372,6 +419,13 @@ path_needs_sudo() {
     parent="$(dirname "$p")"
     if [[ -e "$parent" && ! -w "$parent" ]]; then
         return 0
+    fi
+    # For directories, check if any file inside is not writable.
+    # find stops at the first match (-quit) so this is fast even for large trees.
+    if [[ -d "$p" ]]; then
+        if find "$p" ! -writable -print -quit 2>/dev/null | grep -q .; then
+            return 0
+        fi
     fi
     return 1
 }
@@ -715,6 +769,74 @@ print_summary() {
 }
 
 # =============================================================================
+# Post-restore command execution
+# =============================================================================
+
+run_restore_commands() {
+    if [[ ${#RESTORE_CMDS[@]} -eq 0 ]]; then
+        return
+    fi
+
+    echo ""
+    echo -e "${C_BOLD}═══════════════════════════════════════════════════════════════${C_RESET}"
+    echo -e "${C_BOLD}  Package Reinstall${C_RESET}"
+    echo -e "${C_BOLD}═══════════════════════════════════════════════════════════════${C_RESET}"
+
+    # Collect unique plugin labels preserving order
+    local -a seen_labels=()
+    for entry in "${RESTORE_CMDS[@]}"; do
+        local label="${entry%%$'\x1e'*}"
+        local already_seen=false
+        for s in "${seen_labels[@]}"; do
+            [[ "$s" == "$label" ]] && already_seen=true && break
+        done
+        [[ "$already_seen" == false ]] && seen_labels+=("$label")
+    done
+
+    for label in "${seen_labels[@]}"; do
+        local -a cmds_for_label=()
+        for entry in "${RESTORE_CMDS[@]}"; do
+            local entry_label="${entry%%$'\x1e'*}"
+            local entry_cmd="${entry#*$'\x1e'}"
+            [[ "$entry_label" == "$label" ]] && cmds_for_label+=("$entry_cmd")
+        done
+
+        echo ""
+        echo -e "  ${C_BOLD}── [$label] ──${C_RESET}"
+        for cmd in "${cmds_for_label[@]}"; do
+            echo -e "    ${C_CYAN}$cmd${C_RESET}"
+        done
+
+        if [[ "$DRY_RUN" == true ]]; then
+            echo -e "    ${C_YELLOW}(dry-run: skipping execution)${C_RESET}"
+            continue
+        fi
+
+        local run_it=false
+        if [[ "$SKIP_CONFIRM" == true ]]; then
+            run_it=true
+            echo -e "    ${C_GREEN}Auto-confirmed (--yes)${C_RESET}"
+        else
+            local ans
+            read -rp "  Run reinstall commands for [$label]? [y/N] " ans
+            [[ "$ans" =~ ^[Yy]$ ]] && run_it=true
+        fi
+
+        if [[ "$run_it" == true ]]; then
+            for cmd in "${cmds_for_label[@]}"; do
+                echo -e "${C_CYAN}Running: $cmd${C_RESET}"
+                eval "$cmd" || echo -e "${C_YELLOW}Warning: restore command failed: $cmd${C_RESET}"
+            done
+        else
+            echo -e "    ${C_YELLOW}Skipped.${C_RESET}"
+        fi
+    done
+
+    echo ""
+    echo -e "${C_BOLD}═══════════════════════════════════════════════════════════════${C_RESET}"
+}
+
+# =============================================================================
 # Plugin listing
 # =============================================================================
 
@@ -925,6 +1047,7 @@ tui_run_restore() {
     ALL_JOBS=()
     load_common
     load_plugins
+    collect_restore_commands
 
     # Restore saved state
     SELECTED_PLUGINS=("${saved_plugins[@]}")
@@ -960,6 +1083,7 @@ tui_run_restore() {
     run_restore
     sudo_keepalive_stop
     print_summary
+    run_restore_commands
 
     echo ""
     read -rp "Press Enter to return to the menu..."
@@ -1013,6 +1137,7 @@ main() {
     ALL_JOBS=()
     load_common
     load_plugins
+    collect_restore_commands
 
     if [[ ${#ALL_JOBS[@]} -eq 0 ]]; then
         echo -e "${C_YELLOW}No restore jobs configured. Check common.conf and plugins.${C_RESET}"
@@ -1029,6 +1154,7 @@ main() {
     run_restore
     sudo_keepalive_stop
     print_summary
+    run_restore_commands
 }
 
 main "$@"

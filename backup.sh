@@ -239,6 +239,8 @@ parse_conf_file() {
         [[ "$line" == ENABLED=* ]] && continue
         # Skip PRE_CMD line (handled separately)
         [[ "$line" == PRE_CMD\ * ]] && continue
+        # Skip RESTORE_CMD line (only meaningful for restore.sh)
+        [[ "$line" == RESTORE_CMD\ * ]] && continue
 
         if [[ "$line" == PATH\ * ]]; then
             _flush_job
@@ -435,6 +437,13 @@ path_needs_sudo() {
     # Existing but unreadable paths need sudo
     if [[ -e "$p" && ! -r "$p" ]]; then
         return 0
+    fi
+    # For directories, check if any file inside is not readable.
+    # find stops at the first match (-quit) so this is fast even for large trees.
+    if [[ -d "$p" ]]; then
+        if find "$p" ! -readable -print -quit 2>/dev/null | grep -q .; then
+            return 0
+        fi
     fi
     return 1
 }
