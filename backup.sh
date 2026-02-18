@@ -238,6 +238,9 @@ parse_conf_file() {
         if [[ "$line" == PATH\ * ]]; then
             _flush_job
             current_path="${line#PATH }"
+            # Expand $HOME and ~ in paths
+            current_path="${current_path//\$HOME/$HOME}"
+            current_path="${current_path/#\~/$HOME}"
             current_includes=""
             current_excludes=""
         elif [[ "$line" == INCLUDE\ * ]]; then
