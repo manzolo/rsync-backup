@@ -801,7 +801,7 @@ tui_main_menu() {
                 6 "Edit plugin config" \
                 7 "Show preview" \
                 8 "Exit" \
-                3>&1 1>&2 2>&3) || break
+                3>&1 1>&2 2>&3) || continue
         else
             choice=$($DIALOG_CMD --title "Rsync Backup Manager" \
                 --menu "Select an action:" 18 50 8 \
@@ -813,7 +813,7 @@ tui_main_menu() {
                 6 "Edit plugin config" \
                 7 "Show preview" \
                 8 "Exit" \
-                3>&1 1>&2 2>&3) || break
+                3>&1 1>&2 2>&3) || continue
         fi
 
         case "$choice" in
