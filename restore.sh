@@ -295,6 +295,7 @@ load_plugins() {
     for pfile in "${plugin_files[@]}"; do
         local pname
         pname="$(basename "$pfile" .conf)"
+        [[ -f "${pfile}.override" ]] && pfile="${pfile}.override"
 
         # If user specified --plugin=..., only load those
         if [[ ${#SELECTED_PLUGINS[@]} -gt 0 ]]; then
@@ -352,6 +353,8 @@ collect_restore_commands() {
     for cfile in "${conf_files[@]}"; do
         local plugin_label
         plugin_label="$(basename "$cfile" .conf)"
+        local read_file="$cfile"
+        [[ -f "${cfile}.override" ]] && read_file="${cfile}.override"
         while IFS= read -r line; do
             line="$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
             if [[ "$line" == RESTORE_CMD\ * ]]; then
@@ -359,7 +362,7 @@ collect_restore_commands() {
                 cmd="${cmd//\$HOME/$HOME}"
                 RESTORE_CMDS+=("${plugin_label}${FS}${cmd}")
             fi
-        done < "$cfile"
+        done < "$read_file"
     done
 }
 
@@ -392,6 +395,8 @@ collect_pre_restore_commands() {
     for cfile in "${conf_files[@]}"; do
         local plugin_label
         plugin_label="$(basename "$cfile" .conf)"
+        local read_file="$cfile"
+        [[ -f "${cfile}.override" ]] && read_file="${cfile}.override"
         while IFS= read -r line; do
             line="$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
             if [[ "$line" == PRE_RESTORE_CMD\ * ]]; then
@@ -399,7 +404,7 @@ collect_pre_restore_commands() {
                 cmd="${cmd//\$HOME/$HOME}"
                 PRE_RESTORE_CMDS+=("${plugin_label}${FS}${cmd}")
             fi
-        done < "$cfile"
+        done < "$read_file"
     done
 }
 
@@ -948,6 +953,7 @@ list_plugins() {
     for pfile in "${plugin_files[@]}"; do
         local pname desc enabled_str status_color
         pname="$(basename "$pfile" .conf)"
+        [[ -f "${pfile}.override" ]] && pfile="${pfile}.override"
         desc="$(plugin_description "$pfile")"
 
         if plugin_is_enabled "$pfile"; then
@@ -1023,6 +1029,7 @@ tui_select_plugins() {
     for pfile in "${plugin_files[@]}"; do
         local pname desc status
         pname="$(basename "$pfile" .conf)"
+        [[ -f "${pfile}.override" ]] && pfile="${pfile}.override"
         desc="$(plugin_description "$pfile")"
 
         # Check if in SELECTED_PLUGINS override, or use file ENABLED status
@@ -1083,6 +1090,7 @@ tui_choose_restore_scope() {
     for pfile in "${plugin_files[@]}"; do
         local pname desc
         pname="$(basename "$pfile" .conf)"
+        [[ -f "${pfile}.override" ]] && pfile="${pfile}.override"
         # Show only enabled plugins (or those in SELECTED_PLUGINS)
         if [[ ${#SELECTED_PLUGINS[@]} -gt 0 ]]; then
             local found=false

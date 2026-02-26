@@ -425,6 +425,65 @@ When you create a dedicated plugin for an app already covered by `dotconfig` or 
 EXCLUDE myapp/
 ```
 
+## Machine-local Customization
+
+Two file types are automatically git-ignored and auto-discovered, letting you customize the backup on a specific machine without modifying tracked files.
+
+### `plugins/<name>.conf.override` — override a tracked plugin
+
+Create a `.conf.override` file alongside any existing plugin to replace it entirely on this machine. The file uses the same format as a normal plugin conf. The plugin name and label still come from the base `.conf` filename.
+
+```bash
+# Disable docker on a machine that doesn't have Docker:
+# plugins/docker.conf.override
+ENABLED=no
+
+# Point a plugin at a different path on this machine:
+# plugins/documenti.conf.override
+ENABLED=yes
+PATH $HOME/Documents/work
+```
+
+### `plugins/<name>.local.conf` — add a machine-only plugin
+
+Create a `.local.conf` file for a plugin that only exists on this machine. It is auto-discovered by the same glob as regular plugins. The plugin name becomes the filename without `.conf` (e.g. `myapp.local`).
+
+```bash
+# plugins/myapp.local.conf
+# My Local App - Machine-specific backup
+ENABLED=yes
+
+PATH $HOME/.config/myapp-local
+EXCLUDE cache/
+```
+
+Use it like any other plugin:
+
+```bash
+./backup.sh --list                         # shows myapp.local as enabled/disabled
+./backup.sh --plugin=myapp.local --yes     # back up only this plugin
+```
+
+Both file types are listed by `--list` and selectable in the TUI. Neither will ever appear in `git status`.
+
+## Testing
+
+`selftest.sh` runs 6 end-to-end tests against a temporary directory, covering the `.local.conf` and `.conf.override` mechanisms without touching real backup data:
+
+```bash
+bash selftest.sh
+```
+
+The tests:
+1. `.local.conf` is auto-discovered and listed as enabled
+2. `.conf.override` with `ENABLED=no` disables the plugin
+3. `.conf.override` replaces the `PATH` — backup uses override path, not base
+4. Full backup writes files to the correct destination
+5. Full restore recovers a modified file from backup
+6. Both files are git-ignored (do not appear in `git status`)
+
+A GitHub Actions workflow (`.github/workflows/selftest.yml`) runs the syntax check and selftest on every push and pull request to `main`.
+
 ## Sudo Handling
 
 Both scripts automatically detect paths that require elevated privileges:

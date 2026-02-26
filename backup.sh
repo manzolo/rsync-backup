@@ -310,6 +310,7 @@ load_plugins() {
     for pfile in "${plugin_files[@]}"; do
         local pname
         pname="$(basename "$pfile" .conf)"
+        [[ -f "${pfile}.override" ]] && pfile="${pfile}.override"
 
         # If user specified --plugin=..., only load those
         if [[ ${#SELECTED_PLUGINS[@]} -gt 0 ]]; then
@@ -350,6 +351,7 @@ run_pre_commands() {
         for pfile in "${plugin_files[@]}"; do
             local pname
             pname="$(basename "$pfile" .conf)"
+            [[ -f "${pfile}.override" ]] && pfile="${pfile}.override"
             if [[ ${#SELECTED_PLUGINS[@]} -gt 0 ]]; then
                 local found=false
                 for sp in "${SELECTED_PLUGINS[@]}"; do
@@ -826,6 +828,7 @@ list_plugins() {
     for pfile in "${plugin_files[@]}"; do
         local pname desc enabled_str status_color
         pname="$(basename "$pfile" .conf)"
+        [[ -f "${pfile}.override" ]] && pfile="${pfile}.override"
         desc="$(plugin_description "$pfile")"
 
         if plugin_is_enabled "$pfile"; then
@@ -910,6 +913,7 @@ tui_select_plugins() {
     for pfile in "${plugin_files[@]}"; do
         local pname desc status
         pname="$(basename "$pfile" .conf)"
+        [[ -f "${pfile}.override" ]] && pfile="${pfile}.override"
         desc="$(plugin_description "$pfile")"
 
         # Check if in SELECTED_PLUGINS override, or use file ENABLED status
@@ -1009,6 +1013,7 @@ tui_choose_plugin_file() {
     for pfile in "${plugin_files[@]}"; do
         local pname desc
         pname="$(basename "$pfile" .conf)"
+        [[ -f "${pfile}.override" ]] && pfile="${pfile}.override"
         desc="$(plugin_description "$pfile")"
         menu_args+=("$pname" "$desc")
         idx=$((idx + 1))
@@ -1044,6 +1049,7 @@ tui_choose_backup_scope() {
     for pfile in "${plugin_files[@]}"; do
         local pname desc
         pname="$(basename "$pfile" .conf)"
+        [[ -f "${pfile}.override" ]] && pfile="${pfile}.override"
         # Show only enabled plugins (or those in SELECTED_PLUGINS)
         if [[ ${#SELECTED_PLUGINS[@]} -gt 0 ]]; then
             local found=false

@@ -26,6 +26,9 @@ A Bash-based backup and restore system using `rsync` with a plugin architecture.
 
 # Syntax check (no tests exist, use bash -n)
 bash -n backup.sh && bash -n restore.sh
+
+# End-to-end self-test (6 tests, patches backup.conf DST to a temp dir)
+bash selftest.sh
 ```
 
 ## Architecture
@@ -144,6 +147,37 @@ RESTORE_EXCLUDE fstab
 PRE_RESTORE_CMD if [[ "$SKIP_CONFIRM" != true ]]; then read -rp "  Restore /etc/fstab? [y/N] " _a; \
   [[ "$_a" =~ ^[Yy]$ ]] && sudo cp "$DST/etc/fstab" /etc/fstab || true; \
   else echo "  (--yes: /etc/fstab not restored)"; fi
+```
+
+### Machine-local plugin customization
+
+Two file types are git-ignored and auto-discovered, for machine-specific overrides without touching tracked files:
+
+**`plugins/<name>.conf.override`** — fully replaces a tracked plugin on this machine:
+- Loaded instead of the base `.conf` file when present
+- Same format as a normal plugin conf (`ENABLED`, `PATH`, `EXCLUDE`, `RESTORE_CMD`, etc.)
+- Plugin name/label still comes from the base `.conf` filename (not the override)
+- The TUI "Edit plugin config" always opens the base `.conf` file
+- Use case: disable a plugin on a machine that lacks the relevant app, or point it at a different path
+
+```bash
+# On a machine without Docker, override to disable:
+# plugins/docker.conf.override
+ENABLED=no
+```
+
+**`plugins/<name>.local.conf`** — a brand-new plugin that only exists on this machine:
+- Auto-discovered by the `*.conf` glob (same as regular plugins)
+- Plugin name = filename without `.conf` (e.g. `myapp.local`)
+- Use with `--plugin=myapp.local` or `ENABLED=yes` to run by default
+- Use case: back up an app or path that is only present on one machine
+
+```bash
+# plugins/myapp.local.conf
+# My Local App - Machine-specific backup
+ENABLED=yes
+
+PATH $HOME/.config/myapp-local
 ```
 
 ## Adding a New Plugin
