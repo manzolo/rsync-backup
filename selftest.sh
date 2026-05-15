@@ -37,8 +37,10 @@ BKUP_HOST="$(hostname)"
 
 cleanup() {
     rm -f "$PLUGIN_FILE" "$PLUGIN_OVERRIDE"
-    if [[ -f backup.conf.bak ]]; then
-        mv backup.conf.bak backup.conf
+    if [[ -f .env.bak ]]; then
+        mv .env.bak .env
+    else
+        rm -f .env
     fi
     rm -rf "$WORK_DIR"
 }
@@ -56,9 +58,9 @@ echo "hello from test" > "$SRC_DIR/testfile.txt"
 mkdir -p "$SRC_DIR/subdir"
 echo "nested file"    > "$SRC_DIR/subdir/nested.txt"
 
-# Patch DST in backup.conf (trap restores backup.conf.bak on exit)
-cp backup.conf backup.conf.bak
-sed -i "s|^DST=.*|DST=$DST_DIR|" backup.conf
+# Write .env with test DST (trap restores/removes it on exit)
+[[ -f .env ]] && cp .env .env.bak
+echo "DST=$DST_DIR" > .env
 
 # Create local plugin
 cat > "$PLUGIN_FILE" <<EOF
