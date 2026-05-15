@@ -725,8 +725,8 @@ confirm_execution() {
     if [[ "$SKIP_CONFIRM" == true ]]; then
         return 0
     fi
-    read -rp "Proceed with backup? [y/N] " ans
-    if [[ ! "$ans" =~ ^[Yy]$ ]]; then
+    read -rp "Proceed with backup? [Y/n] " ans
+    if [[ "$ans" =~ ^[Nn]$ ]]; then
         echo "Backup cancelled."
         exit 0
     fi
