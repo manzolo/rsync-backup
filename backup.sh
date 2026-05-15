@@ -196,12 +196,18 @@ load_global_config() {
         echo -e "${C_RED}Error: Global config not found: $GLOBAL_CONF${C_RESET}"
         exit 1
     fi
-    # Source the config (it's valid bash variable assignments)
     # shellcheck source=/dev/null
     source "$GLOBAL_CONF"
 
+    # Machine-specific overrides (DST, LOG_FILE, …)
+    local env_file="$SCRIPT_DIR/.env"
+    if [[ -f "$env_file" ]]; then
+        # shellcheck source=/dev/null
+        source "$env_file"
+    fi
+
     if [[ -z "$DST" ]]; then
-        echo -e "${C_RED}Error: DST is not set in $GLOBAL_CONF${C_RESET}"
+        echo -e "${C_RED}Error: DST is not set. Create a .env file with DST=<path> (see .env.example).${C_RESET}"
         exit 1
     fi
 

@@ -1,3 +1,4 @@
 backup.log
+.env
 plugins/*.conf.override
 plugins/*.local.conf
