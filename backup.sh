@@ -491,11 +491,13 @@ validate_paths() {
 
 build_rsync_args() {
     local job="$1"
+    local force_sudo="${2:-}"   # optional override: pass "yes" to force sudo
     local src includes_str excludes_str needs_sudo
     src="$(echo "$job" | cut -d"$FS" -f1)"
     includes_str="$(echo "$job" | cut -d"$FS" -f3)"
     excludes_str="$(echo "$job" | cut -d"$FS" -f4)"
     needs_sudo="$(echo "$job" | cut -d"$FS" -f5)"
+    [[ "$force_sudo" == "yes" ]] && needs_sudo="yes"
 
     local dest="$DST$src"
     local -a args=()
@@ -752,9 +754,6 @@ run_backup() {
             echo -e "${C_BOLD}[$job_num/$total_jobs] Backing up: $src ($label)${C_RESET}"
         fi
 
-        local cmd
-        cmd="$(build_rsync_args "$job")"
-
         # Create destination directory
         local dest_dir
         if [[ -d "$src" ]]; then
@@ -765,6 +764,22 @@ run_backup() {
 
         local needs_sudo
         needs_sudo="$(echo "$job" | cut -d"$FS" -f5)"
+
+        # Escalate to sudo if the destination parent is not writable (e.g., it was
+        # created root-owned by a previous sudo job on the same backup run).
+        if [[ "$needs_sudo" != "yes" ]]; then
+            local check_dir="$dest_dir"
+            while [[ ! -e "$check_dir" ]]; do
+                check_dir="$(dirname "$check_dir")"
+            done
+            if [[ ! -w "$check_dir" ]]; then
+                needs_sudo="yes"
+            fi
+        fi
+
+        local cmd
+        cmd="$(build_rsync_args "$job" "$needs_sudo")"
+
         if [[ "$needs_sudo" == "yes" ]]; then
             sudo mkdir -p "$dest_dir"
         else
