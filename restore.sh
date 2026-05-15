@@ -496,6 +496,20 @@ path_needs_sudo() {
     return 1
 }
 
+check_dst() {
+    local base_dst
+    base_dst="$(dirname "$DST")"
+    if [[ ! -d "$base_dst" ]]; then
+        echo -e "${C_RED}Error: Backup source not available: $base_dst${C_RESET}"
+        echo -e "${C_YELLOW}Ensure the backup drive is mounted and try again.${C_RESET}"
+        exit 1
+    fi
+    if [[ ! -d "$DST" ]]; then
+        echo -e "${C_RED}Error: No backup found for this host: $DST${C_RESET}"
+        exit 1
+    fi
+}
+
 validate_paths() {
     local warn_count=0
     for i in "${!ALL_JOBS[@]}"; do
@@ -1237,6 +1251,8 @@ main() {
         list_plugins
         exit 0
     fi
+
+    check_dst
 
     # TUI mode
     if [[ "$USE_TUI" == true ]]; then
