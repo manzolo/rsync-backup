@@ -416,14 +416,24 @@ sudo_preauth() {
         echo ""
     fi
 
-    if ! sudo -v 2>/dev/null; then
+    # Non-interactive check first (works when NOPASSWD: /usr/bin/rsync is in sudoers)
+    if sudo -n rsync --version >/dev/null 2>&1; then
+        : # rsync runs passwordless — no interactive auth needed
+    elif [[ -t 0 ]]; then
+        # Interactive fallback: prompt once if a TTY is available
+        if ! sudo -v; then
+            echo -e "${C_RED}Error: sudo authentication failed. Cannot proceed with privileged jobs.${C_RESET}"
+            exit 1
+        fi
+    else
         echo -e "${C_RED}Error: sudo authentication failed. Cannot proceed with privileged jobs.${C_RESET}"
+        echo -e "${C_RED}For unattended runs add to sudoers:  $USER ALL=(ALL) NOPASSWD: /usr/bin/rsync${C_RESET}"
         exit 1
     fi
 
     # Start a background keep-alive to refresh the sudo timestamp
     # so long-running operations don't lose the cached credentials.
-    (while true; do sudo -n true 2>/dev/null; sleep 50; done) &
+    (while true; do sudo -n rsync --version >/dev/null 2>&1; sleep 50; done) &
     SUDO_KEEPALIVE_PID=$!
 }
 
@@ -522,6 +532,7 @@ build_rsync_args() {
     # shellcheck disable=SC2086
     read -ra flag_arr <<< "$RSYNC_FLAGS"
     args+=("${flag_arr[@]}")
+    args+=("--mkpath")
 
     # Delete flag
     if [[ "$RSYNC_DELETE" == "yes" && "$NO_DELETE" == false ]]; then
@@ -795,12 +806,6 @@ run_backup() {
 
         local cmd
         cmd="$(build_rsync_args "$job" "$needs_sudo")"
-
-        if [[ "$needs_sudo" == "yes" ]]; then
-            sudo mkdir -p "$dest_dir"
-        else
-            mkdir -p "$dest_dir"
-        fi
 
         if [[ "$QUIET" == true ]]; then
             if eval "$cmd" >> "${LOG_FILE:-/dev/null}" 2>&1; then
