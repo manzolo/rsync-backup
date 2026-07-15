@@ -105,7 +105,9 @@ Paths outside `$HOME`, or paths inside `$HOME` that are unreadable (backup) / un
 
 ### Versioning (backup.sh only)
 
-When `VERSIONING=yes` (default), `build_rsync_args` adds `--backup --backup-dir=$DST/.versions/$RUN_TS<src>` so files deleted or overwritten on the destination are moved there instead of being lost. `RUN_TS` is set once per run in `load_global_config`; `prune_versions` (called at the end of `run_backup`, skipped on dry-run) removes version dirs older than `VERSIONS_KEEP_DAYS`. `--no-versions` disables it per run. The log is rotated to `LOG_FILE.1` in `load_global_config` when it exceeds `LOG_MAX_MB`.
+When `VERSIONING=yes` (default), `build_rsync_args` adds `--backup --backup-dir=$(version_backup_dir src)` (i.e. `$DST/.versions/$RUN_TS<src>`) so files deleted or overwritten on the destination are moved there instead of being lost. `RUN_TS` is set once per run in `load_global_config`; `prune_versions` (called at the end of `run_backup`, skipped on dry-run) deletes the empty pre-created chains of the current run, then removes version dirs older than `VERSIONS_KEEP_DAYS`. `--no-versions` disables it per run. The log is rotated to `LOG_FILE.1` in `load_global_config` when it exceeds `LOG_MAX_MB`.
+
+**Gotcha — sudo jobs vs shared version prefixes:** `run_backup` pre-creates every job's version dir chain as the plain user before the job loop. Without this, the first sudo job to move a file creates shared prefixes like `.versions/<ts>/home/user/.config` root-owned, and later non-sudo jobs fail with `rsync error: error in file IO (code 11)` when moving their replaced files there.
 
 ### restore.sh Differences from backup.sh
 

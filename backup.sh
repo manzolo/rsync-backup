@@ -255,6 +255,16 @@ versioning_active() {
     [[ "$VERSIONING" == "yes" && "$NO_VERSIONS" == false ]]
 }
 
+# Dir where a job's replaced/deleted files are moved by --backup-dir
+version_backup_dir() {
+    local src="$1"
+    if [[ -d "$src" ]]; then
+        echo "$DST/.versions/$RUN_TS$src"
+    else
+        echo "$DST/.versions/$RUN_TS$(dirname "$src")"
+    fi
+}
+
 # Parse a conf file with PATH/INCLUDE/EXCLUDE format.
 # Populates ALL_JOBS array with entries: "source|includes|excludes|label"
 parse_conf_file() {
@@ -577,13 +587,7 @@ build_rsync_args() {
     # Versioning: files deleted or overwritten on the destination are moved to
     # $DST/.versions/<run timestamp>/<original path> instead of being lost
     if versioning_active; then
-        local backup_dir
-        if [[ -d "$src" ]]; then
-            backup_dir="$DST/.versions/$RUN_TS$src"
-        else
-            backup_dir="$DST/.versions/$RUN_TS$(dirname "$src")"
-        fi
-        args+=("--backup" "--backup-dir=$backup_dir")
+        args+=("--backup" "--backup-dir=$(version_backup_dir "$src")")
     fi
 
     # Dry-run
@@ -812,6 +816,18 @@ run_backup() {
     local job_num=0
     local total_jobs=${#ALL_JOBS[@]}
 
+    # Pre-create every job's version dir chain as the plain user BEFORE any
+    # sudo job runs: sudo rsync would otherwise create shared path prefixes
+    # (e.g. .versions/<ts>/home/user/.config) root-owned, and later non-sudo
+    # jobs would fail with rsync IO error 11 when moving replaced files there.
+    if versioning_active && [[ "$DRY_RUN" == false ]]; then
+        local pre_src
+        for job in "${ALL_JOBS[@]}"; do
+            pre_src="$(echo "$job" | cut -d"$FS" -f1)"
+            mkdir -p "$(version_backup_dir "$pre_src")" 2>/dev/null || true
+        done
+    fi
+
     for job in "${ALL_JOBS[@]}"; do
         job_num=$((job_num + 1))
         local src label
@@ -889,9 +905,14 @@ run_backup() {
 prune_versions() {
     [[ "$DRY_RUN" == true ]] && return 0
     versioning_active || return 0
-    [[ "${VERSIONS_KEEP_DAYS:-0}" -gt 0 ]] || return 0
     local vroot="$DST/.versions"
     [[ -d "$vroot" ]] || return 0
+
+    # Drop the empty dir chains pre-created by run_backup for jobs that had
+    # nothing to version (including the whole run dir when nothing changed)
+    find "$vroot/$RUN_TS" -depth -type d -empty -delete 2>/dev/null || true
+
+    [[ "${VERSIONS_KEEP_DAYS:-0}" -gt 0 ]] || return 0
 
     local -a old_dirs=()
     mapfile -t old_dirs < <(find "$vroot" -mindepth 1 -maxdepth 1 -type d -mtime "+$VERSIONS_KEEP_DAYS" 2>/dev/null)
