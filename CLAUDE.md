@@ -39,7 +39,7 @@ Both `backup.sh` and `restore.sh` share the same design: they parse config files
 
 | File | Purpose |
 |---|---|
-| `backup.conf` | Global settings: `DST`, `RSYNC_FLAGS`, `RSYNC_DELETE`, `LOG_FILE` |
+| `backup.conf` | Global settings: `DST`, `RSYNC_FLAGS`, `RSYNC_DELETE`, `LOG_FILE`, `VERSIONING`, `VERSIONS_KEEP_DAYS`, `LOG_MAX_MB` |
 | `common.conf` | Paths always included unless `--no-common` is passed |
 | `plugins/*.conf` | Plugin-specific paths; auto-discovered, no registration needed |
 
@@ -102,6 +102,10 @@ Paths outside `$HOME`, or paths inside `$HOME` that are unreadable (backup) / un
 - `SELECTED_PLUGINS` — array populated by `--plugin=` flags; empty means "all enabled"
 - `RESTORE_CMDS` — array of `plugin_label${FS}command` entries for post-restore commands
 - `PRE_RESTORE_CMDS` — array of `plugin_label${FS}command` entries for pre-restore commands
+
+### Versioning (backup.sh only)
+
+When `VERSIONING=yes` (default), `build_rsync_args` adds `--backup --backup-dir=$DST/.versions/$RUN_TS<src>` so files deleted or overwritten on the destination are moved there instead of being lost. `RUN_TS` is set once per run in `load_global_config`; `prune_versions` (called at the end of `run_backup`, skipped on dry-run) removes version dirs older than `VERSIONS_KEEP_DAYS`. `--no-versions` disables it per run. The log is rotated to `LOG_FILE.1` in `load_global_config` when it exceeds `LOG_MAX_MB`.
 
 ### restore.sh Differences from backup.sh
 

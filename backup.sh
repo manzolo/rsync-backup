@@ -27,6 +27,7 @@ SKIP_CONFIRM=false
 USE_TUI=false
 NO_COMMON=false
 NO_DELETE=false
+NO_VERSIONS=false
 QUIET=false
 LIST_ONLY=false
 SHOW_HELP=false
@@ -42,6 +43,10 @@ DST=""
 RSYNC_FLAGS="--archive --verbose --human-readable --progress --partial"
 RSYNC_DELETE=yes
 LOG_FILE=""
+VERSIONING=yes          # keep deleted/overwritten files in $DST/.versions/<timestamp>
+VERSIONS_KEEP_DAYS=14   # prune version dirs older than N days (0 = keep forever)
+LOG_MAX_MB=20           # rotate LOG_FILE to LOG_FILE.1 above this size (0 = never)
+RUN_TS=""               # timestamp of this run, set in load_global_config
 
 # =============================================================================
 # Dependency checks
@@ -87,6 +92,7 @@ parse_args() {
             --yes)        SKIP_CONFIRM=true ;;
             --no-common)  NO_COMMON=true ;;
             --no-delete)  NO_DELETE=true ;;
+            --no-versions) NO_VERSIONS=true ;;
             --quiet)      QUIET=true ;;
             --list)       LIST_ONLY=true ;;
             --help)       SHOW_HELP=true ;;
@@ -124,6 +130,7 @@ OPTIONS
                         Example: --plugin=firefox --plugin=ssh
     --no-common         Skip common.conf paths
     --no-delete         Override RSYNC_DELETE, do not delete from destination
+    --no-versions       Override VERSIONING, replaced/deleted files are lost
     --list              List all plugins and their ENABLED status, then exit
     --quiet             Minimal output (summary only)
     --help              Show this help message
@@ -134,6 +141,9 @@ CONFIGURATION FORMAT
         RSYNC_FLAGS="--archive --verbose --human-readable --progress --partial"
         RSYNC_DELETE=yes
         LOG_FILE=/path/to/backup.log
+        VERSIONING=yes          # keep replaced/deleted files in .versions/
+        VERSIONS_KEEP_DAYS=14   # prune versions older than N days (0 = forever)
+        LOG_MAX_MB=20           # rotate log above this size (0 = never)
 
     Path config (common.conf and plugins/*.conf):
         Each PATH line defines a source directory/file to back up.
@@ -162,6 +172,14 @@ DELETE BEHAVIOR
     When RSYNC_DELETE=yes (default), rsync uses --delete to create an exact
     mirror. Files deleted from the source will also be deleted from the backup.
     Use --no-delete to override this and keep old files on the destination.
+
+VERSIONING
+    When VERSIONING=yes (default), files that would be deleted or overwritten
+    on the destination are moved to $DST/<hostname>/.versions/<run timestamp>/
+    preserving their original path, instead of being lost. This protects the
+    mirror from propagating accidental deletions or corrupted files.
+    Version dirs older than VERSIONS_KEEP_DAYS are pruned after each run.
+    To recover a file, copy it back from the .versions dir (plain files).
 
 SUDO HANDLING
     The script automatically detects paths that require elevated privileges:
@@ -218,6 +236,23 @@ load_global_config() {
     if [[ -n "${LOG_FILE:-}" ]]; then
         mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
     fi
+
+    # Rotate the log when it grows beyond LOG_MAX_MB (keeps one previous file)
+    if [[ -n "${LOG_FILE:-}" && -f "$LOG_FILE" && "${LOG_MAX_MB:-0}" -gt 0 ]]; then
+        local log_bytes
+        log_bytes="$(stat -c%s "$LOG_FILE" 2>/dev/null || echo 0)"
+        if (( log_bytes > LOG_MAX_MB * 1024 * 1024 )); then
+            mv -f "$LOG_FILE" "$LOG_FILE.1"
+        fi
+    fi
+
+    # One timestamp per run: all versioned files of this run share the same dir
+    RUN_TS="$(date +%Y-%m-%d_%H%M%S)"
+}
+
+# Versioning is on unless disabled in config or via --no-versions
+versioning_active() {
+    [[ "$VERSIONING" == "yes" && "$NO_VERSIONS" == false ]]
 }
 
 # Parse a conf file with PATH/INCLUDE/EXCLUDE format.
@@ -539,6 +574,18 @@ build_rsync_args() {
         args+=("--delete")
     fi
 
+    # Versioning: files deleted or overwritten on the destination are moved to
+    # $DST/.versions/<run timestamp>/<original path> instead of being lost
+    if versioning_active; then
+        local backup_dir
+        if [[ -d "$src" ]]; then
+            backup_dir="$DST/.versions/$RUN_TS$src"
+        else
+            backup_dir="$DST/.versions/$RUN_TS$(dirname "$src")"
+        fi
+        args+=("--backup" "--backup-dir=$backup_dir")
+    fi
+
     # Dry-run
     if [[ "$DRY_RUN" == true ]]; then
         args+=("--dry-run")
@@ -613,6 +660,11 @@ show_preview() {
     else
         echo -e "  Delete:           ${C_GREEN}disabled${C_RESET}"
     fi
+    if versioning_active; then
+        echo -e "  Versioning:       ${C_GREEN}.versions/$RUN_TS (keep ${VERSIONS_KEEP_DAYS}d)${C_RESET}"
+    else
+        echo -e "  Versioning:       ${C_YELLOW}disabled${C_RESET}"
+    fi
     echo ""
 
     local current_label=""
@@ -676,6 +728,11 @@ generate_preview_text() {
         echo "  Mode:             DRY-RUN (no changes will be made)"
     else
         echo "  Mode:             LIVE"
+    fi
+    if versioning_active; then
+        echo "  Versioning:       .versions/$RUN_TS (keep ${VERSIONS_KEEP_DAYS}d)"
+    else
+        echo "  Versioning:       disabled"
     fi
     if [[ "$delete_active" == true ]]; then
         echo "  Delete:           --delete active (mirror mode)"
@@ -822,6 +879,32 @@ run_backup() {
             fi
         fi
     done
+
+    prune_versions
+}
+
+# Remove version dirs older than VERSIONS_KEEP_DAYS from $DST/.versions.
+# Version dirs may contain root-owned files (sudo jobs): retry with sudo -n,
+# and warn instead of failing when neither works.
+prune_versions() {
+    [[ "$DRY_RUN" == true ]] && return 0
+    versioning_active || return 0
+    [[ "${VERSIONS_KEEP_DAYS:-0}" -gt 0 ]] || return 0
+    local vroot="$DST/.versions"
+    [[ -d "$vroot" ]] || return 0
+
+    local -a old_dirs=()
+    mapfile -t old_dirs < <(find "$vroot" -mindepth 1 -maxdepth 1 -type d -mtime "+$VERSIONS_KEEP_DAYS" 2>/dev/null)
+    [[ ${#old_dirs[@]} -eq 0 ]] && return 0
+
+    for d in "${old_dirs[@]}"; do
+        rm -rf "$d" 2>/dev/null || sudo -n rm -rf "$d" 2>/dev/null || \
+            echo -e "${C_YELLOW}Could not prune old versions dir (needs sudo): $d${C_RESET}"
+    done
+    if [[ "$QUIET" == false ]]; then
+        echo ""
+        echo -e "Pruned ${#old_dirs[@]} version dir(s) older than $VERSIONS_KEEP_DAYS days from $vroot"
+    fi
 }
 
 print_summary() {
@@ -840,6 +923,9 @@ print_summary() {
     echo -e "  Elapsed time:    ${mins}m ${secs}s"
     if [[ -n "${LOG_FILE:-}" && "$LOG_FILE" != "" ]]; then
         echo -e "  Log file:        ${C_CYAN}$LOG_FILE${C_RESET}"
+    fi
+    if [[ "$DRY_RUN" == false ]] && versioning_active && [[ -d "$DST/.versions/$RUN_TS" ]]; then
+        echo -e "  Replaced files:  ${C_CYAN}$DST/.versions/$RUN_TS${C_RESET}"
     fi
     if [[ "$DRY_RUN" == true ]]; then
         echo -e "  ${C_YELLOW}(dry-run mode - no actual changes were made)${C_RESET}"

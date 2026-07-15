@@ -104,6 +104,7 @@ backup.sh [OPTIONS]
 | `--plugin=NAME` | Back up only the specified plugin (repeatable) |
 | `--no-common` | Skip paths defined in common.conf |
 | `--no-delete` | Override RSYNC_DELETE, do not delete from destination |
+| `--no-versions` | Override VERSIONING, replaced/deleted files are lost |
 | `--list` | List all plugins and their ENABLED status |
 | `--quiet` | Minimal output (summary only) |
 | `--help` | Show detailed help |
@@ -224,7 +225,35 @@ RSYNC_DELETE=yes
 
 # Log file path (parent directory is created automatically)
 LOG_FILE=$HOME/backups/rsync-backup/backup.log
+
+# Versioning safety net: replaced/deleted files are moved to
+# $DST/$(hostname)/.versions/<run timestamp>/ instead of being lost
+VERSIONING=yes
+
+# Prune version dirs older than N days after each run (0 = keep forever)
+VERSIONS_KEEP_DAYS=14
+
+# Rotate LOG_FILE to LOG_FILE.1 above this size in MB (0 = never)
+LOG_MAX_MB=20
 ```
+
+### Versioning
+
+With `RSYNC_DELETE=yes` the backup is an exact mirror: an accidental deletion
+or a corrupted file on the source would propagate to the backup on the next
+run. With `VERSIONING=yes` (default), rsync runs with `--backup --backup-dir`
+so every file that would be deleted or overwritten on the destination is moved
+to `$DST/$(hostname)/.versions/<run timestamp>/<original path>` instead.
+
+To recover a file, just copy it back — versions are plain files:
+
+```bash
+cp "$DST/$(hostname)/.versions/2026-07-15_173444/home/manzolo/.config/app/file.conf" \
+   ~/.config/app/file.conf
+```
+
+Version dirs older than `VERSIONS_KEEP_DAYS` are pruned automatically after
+each live run (dry-runs never write nor prune).
 
 ### common.conf - Always-included Paths
 

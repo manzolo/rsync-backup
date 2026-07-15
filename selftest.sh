@@ -2,13 +2,14 @@
 # =============================================================================
 # selftest.sh — End-to-end tests for .local.conf and .conf.override mechanisms
 # =============================================================================
-# Runs 6 tests covering:
+# Runs 7 tests covering:
 #   1. .local.conf auto-discovery (listed as enabled)
 #   2. .conf.override with ENABLED=no disables plugin
 #   3. .conf.override replaces PATH (override content, not base)
 #   4. Full backup with base plugin (files land at correct destination)
 #   5. Full restore recovers modified file
 #   6. Both files are git-ignored
+#   7. Versioning: overwritten file is preserved in .versions/<timestamp>/
 # =============================================================================
 set -euo pipefail
 
@@ -71,7 +72,7 @@ PATH $SRC_DIR
 EOF
 
 echo ""
-echo -e "${C_BOLD}Running 6 tests...${C_RESET}"
+echo -e "${C_BOLD}Running 7 tests...${C_RESET}"
 echo ""
 
 # =============================================================================
@@ -193,9 +194,33 @@ fi
 PASS "Neither file appears in git status (both are git-ignored)"
 
 # =============================================================================
+# Test 7: Versioning — overwritten file is preserved in .versions/<timestamp>/
+# =============================================================================
+
+INFO "Test 7: versioning preserves the overwritten file in .versions/"
+
+rm -f "$PLUGIN_OVERRIDE"   # test 6 left an empty override that disables the plugin
+echo "version 2" > "$SRC_DIR/testfile.txt"
+
+./backup.sh --yes --quiet --no-common --plugin="$PLUGIN_NAME"
+
+if [[ "$(cat "$BKUP_DEST/testfile.txt")" != "version 2" ]]; then
+    FAIL "Backup destination was not updated to new content (test 7)"
+fi
+
+VERSIONED=("$DST_DIR/$BKUP_HOST/.versions/"*"$SRC_DIR/testfile.txt")
+if [[ ! -f "${VERSIONED[0]}" ]]; then
+    FAIL "Old testfile.txt not found under .versions/ (test 7)"
+fi
+if [[ "$(cat "${VERSIONED[0]}")" != "hello from test" ]]; then
+    FAIL "Versioned file content mismatch: expected original content (test 7)"
+fi
+PASS "Old content preserved in ${VERSIONED[0]#"$DST_DIR/"}"
+
+# =============================================================================
 # Done
 # =============================================================================
 
 echo ""
-echo -e "${C_BOLD}${C_GREEN}All 6 tests passed.${C_RESET}"
+echo -e "${C_BOLD}${C_GREEN}All 7 tests passed.${C_RESET}"
 echo ""
