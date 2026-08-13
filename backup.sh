@@ -526,6 +526,19 @@ check_dst() {
         echo -e "${C_YELLOW}Ensure the backup drive is mounted and try again.${C_RESET}"
         exit 1
     fi
+    # The directory of a mount point exists even when nothing is mounted on it,
+    # so -d alone is not enough: with the drive unmounted rsync would happily
+    # write the whole backup onto the root filesystem. When fstab declares
+    # base_dst as a mount point, require it to be actually mounted. Destinations
+    # not declared in fstab (removable drives under /media, plain directories)
+    # keep the previous behaviour.
+    if findmnt --fstab --mountpoint "$base_dst" >/dev/null 2>&1 \
+       && ! mountpoint -q "$base_dst"; then
+        echo -e "${C_RED}Error: Destination not mounted: $base_dst${C_RESET}"
+        echo -e "${C_YELLOW}fstab declares it as a mount point but nothing is mounted there.${C_RESET}"
+        echo -e "${C_YELLOW}Mount the backup drive and try again (refusing to back up onto the root filesystem).${C_RESET}"
+        exit 1
+    fi
 }
 
 validate_paths() {
