@@ -948,6 +948,11 @@ print_summary() {
     local mins=$((elapsed / 60))
     local secs=$((elapsed % 60))
 
+    # The summary is written to the log too, not just to the terminal. Before,
+    # it reached the log only if the caller redirected stdout there — and after
+    # a rotation that redirection still points at the old inode, so the one
+    # block worth reading landed in LOG_FILE.1 while the run filled LOG_FILE.
+    {
     echo ""
     echo -e "${C_BOLD}═══════════════════════════════════════════════════════════════${C_RESET}"
     echo -e "${C_BOLD}  Backup Summary${C_RESET}"
@@ -965,6 +970,7 @@ print_summary() {
         echo -e "  ${C_YELLOW}(dry-run mode - no actual changes were made)${C_RESET}"
     fi
     echo -e "${C_BOLD}═══════════════════════════════════════════════════════════════${C_RESET}"
+    } | tee -a "${LOG_FILE:-/dev/null}"
 }
 
 # =============================================================================
