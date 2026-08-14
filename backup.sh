@@ -952,6 +952,15 @@ print_summary() {
     # it reached the log only if the caller redirected stdout there — and after
     # a rotation that redirection still points at the old inode, so the one
     # block worth reading landed in LOG_FILE.1 while the run filled LOG_FILE.
+    #
+    # But the cron line already appends stdout to that same file, and there
+    # teeing wrote the block twice. So tee only when stdout is not already the
+    # current log: after a rotation the two inodes differ and the tee is what
+    # puts the summary in the file the run actually filled.
+    local summary_sink="${LOG_FILE:-}"
+    if [[ -z "$summary_sink" ]] || [[ /dev/stdout -ef "$summary_sink" ]]; then
+        summary_sink=/dev/null
+    fi
     {
     echo ""
     echo -e "${C_BOLD}═══════════════════════════════════════════════════════════════${C_RESET}"
@@ -970,7 +979,7 @@ print_summary() {
         echo -e "  ${C_YELLOW}(dry-run mode - no actual changes were made)${C_RESET}"
     fi
     echo -e "${C_BOLD}═══════════════════════════════════════════════════════════════${C_RESET}"
-    } | tee -a "${LOG_FILE:-/dev/null}"
+    } | tee -a "$summary_sink"
 }
 
 # =============================================================================
