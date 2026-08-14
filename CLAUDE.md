@@ -92,7 +92,15 @@ load_common → load_plugins → collect_pre_restore_commands → collect_restor
 
 ### Sudo Detection
 
-Paths outside `$HOME`, or paths inside `$HOME` that are unreadable (backup) / unwritable (restore), automatically run as `sudo rsync`. If any job needs sudo, both scripts pre-authenticate once upfront and run a background keep-alive (`sudo -v` every 50 s).
+Paths outside `$HOME`, or paths inside `$HOME` that are unreadable (backup) / unwritable (restore), automatically run as `sudo rsync`. If any job needs sudo, both scripts pre-authenticate once upfront in `sudo_preauth`, in this order:
+
+1. `sudo -n rsync --version` — succeeds with `NOPASSWD: /usr/bin/rsync` in sudoers, and nothing is asked
+2. otherwise, if a TTY is available on stdin, one `sudo -v` prompt
+3. otherwise the run stops, printing the sudoers line to add for unattended use
+
+Do not go back to a plain `sudo -v` here: with only `NOPASSWD: /usr/bin/rsync` in sudoers it still asks for a password, so every unattended run aborted before the first job, dry runs included. The background keep-alive refreshes with `sudo -n rsync --version` every 50 s for the same reason — `sudo -n true` fails under that sudoers and kept nothing alive.
+
+Also keep privileged commands limited to rsync: an unconditional `sudo mkdir -p` in `restore.sh` used to break unattended runs, since sudoers only allows rsync.
 
 ### Key Variables in backup.sh / restore.sh
 
