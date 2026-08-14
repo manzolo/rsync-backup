@@ -443,14 +443,26 @@ sudo_preauth() {
         echo ""
     fi
 
-    if ! sudo -v 2>/dev/null; then
+    # Same detection as backup.sh, which this had drifted away from: with only
+    # NOPASSWD: /usr/bin/rsync in sudoers, a plain `sudo -v` fails and the whole
+    # restore aborted — even a --dry-run, which writes nothing.
+    if sudo -n rsync --version >/dev/null 2>&1; then
+        : # rsync runs passwordless — no interactive auth needed
+    elif [[ -t 0 ]]; then
+        # Interactive fallback: prompt once if a TTY is available
+        if ! sudo -v; then
+            echo -e "${C_RED}Error: sudo authentication failed. Cannot proceed with privileged jobs.${C_RESET}"
+            exit 1
+        fi
+    else
         echo -e "${C_RED}Error: sudo authentication failed. Cannot proceed with privileged jobs.${C_RESET}"
+        echo -e "${C_RED}For unattended runs add to sudoers:  $USER ALL=(ALL) NOPASSWD: /usr/bin/rsync${C_RESET}"
         exit 1
     fi
 
     # Start a background keep-alive to refresh the sudo timestamp
     # so long-running operations don't lose the cached credentials.
-    (while true; do sudo -n true 2>/dev/null; sleep 50; done) &
+    (while true; do sudo -n rsync --version >/dev/null 2>&1; sleep 50; done) &
     SUDO_KEEPALIVE_PID=$!
 }
 
@@ -740,10 +752,20 @@ confirm_execution() {
     if [[ "$SKIP_CONFIRM" == true ]]; then
         return 0
     fi
-    echo -e "${C_RED}${C_BOLD}WARNING: This will overwrite files on your live system.${C_RESET}"
-    echo -e "${C_YELLOW}Consider running with --dry-run first to preview changes.${C_RESET}"
-    echo ""
-    read -rp "Proceed with restore? [y/N] " ans
+    local ans
+    if [[ "$DRY_RUN" == true ]]; then
+        # Don't claim the live system is at risk while rsync runs with -n.
+        # A warning that cries wolf teaches people to answer y without reading,
+        # and the real one looks exactly the same.
+        echo -e "${C_YELLOW}${C_BOLD}DRY-RUN: nothing will be written to your live system.${C_RESET}"
+        echo ""
+        read -rp "Proceed with the dry run? [y/N] " ans
+    else
+        echo -e "${C_RED}${C_BOLD}WARNING: This will overwrite files on your live system.${C_RESET}"
+        echo -e "${C_YELLOW}Consider running with --dry-run first to preview changes.${C_RESET}"
+        echo ""
+        read -rp "Proceed with restore? [y/N] " ans
+    fi
     if [[ ! "$ans" =~ ^[Yy]$ ]]; then
         echo "Restore cancelled."
         exit 0
@@ -802,10 +824,16 @@ run_restore() {
 
         local needs_sudo
         needs_sudo="$(echo "$job" | cut -d"$FS" -f5)"
-        if [[ "$needs_sudo" == "yes" ]]; then
-            sudo mkdir -p "$dest_dir"
-        else
-            mkdir -p "$dest_dir"
+        # Only when there is something to create, and never during a dry run:
+        # a preview that announces "nothing will be written" must not create
+        # directories on the live system. The unconditional privileged mkdir
+        # also broke unattended runs, since sudoers here only allows rsync.
+        if [[ "$DRY_RUN" == false && ! -d "$dest_dir" ]]; then
+            if [[ "$needs_sudo" == "yes" ]]; then
+                sudo mkdir -p "$dest_dir"
+            else
+                mkdir -p "$dest_dir"
+            fi
         fi
 
         if [[ "$QUIET" == true ]]; then
