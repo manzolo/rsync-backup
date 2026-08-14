@@ -18,6 +18,13 @@ C_MAGENTA='\033[0;35m'
 C_CYAN='\033[0;36m'
 C_BOLD='\033[1m'
 
+# No escape codes unless stdout is a terminal, same rule as backup.sh: a
+# restore driven from a script or through a pipe should leave readable output
+# behind. NO_COLOR is honoured as well (https://no-color.org).
+if [[ ! -t 1 || -n "${NO_COLOR:-}" ]]; then
+    C_RESET='' C_RED='' C_GREEN='' C_YELLOW='' C_MAGENTA='' C_CYAN='' C_BOLD=''
+fi
+
 # --- Field separator for job entries (ASCII Record Separator) ---
 FS=$'\x1e'
 

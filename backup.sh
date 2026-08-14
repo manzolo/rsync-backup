@@ -18,6 +18,13 @@ C_MAGENTA='\033[0;35m'
 C_CYAN='\033[0;36m'
 C_BOLD='\033[1m'
 
+# No escape codes unless stdout is a terminal. The cron line appends stdout to
+# LOG_FILE, so the colours ended up in the log and it could not be read without
+# `cat -v`. NO_COLOR is honoured as well (https://no-color.org).
+if [[ ! -t 1 || -n "${NO_COLOR:-}" ]]; then
+    C_RESET='' C_RED='' C_GREEN='' C_YELLOW='' C_MAGENTA='' C_CYAN='' C_BOLD=''
+fi
+
 # --- Field separator for job entries (ASCII Record Separator) ---
 FS=$'\x1e'
 
@@ -953,15 +960,17 @@ print_summary() {
     # a rotation that redirection still points at the old inode, so the one
     # block worth reading landed in LOG_FILE.1 while the run filled LOG_FILE.
     #
-    # But the cron line already appends stdout to that same file, and there
-    # teeing wrote the block twice. So tee only when stdout is not already the
-    # current log: after a rotation the two inodes differ and the tee is what
-    # puts the summary in the file the run actually filled.
+    # But the cron line already appends stdout to that same file, and there the
+    # block was written twice. So write to the file only when stdout is not
+    # already the current log: after a rotation the two inodes differ, and that
+    # second copy is what puts the summary in the file the run actually filled.
     local summary_sink="${LOG_FILE:-}"
     if [[ -z "$summary_sink" ]] || [[ /dev/stdout -ef "$summary_sink" ]]; then
-        summary_sink=/dev/null
+        summary_sink=""
     fi
-    {
+
+    local summary
+    summary="$( {
     echo ""
     echo -e "${C_BOLD}═══════════════════════════════════════════════════════════════${C_RESET}"
     echo -e "${C_BOLD}  Backup Summary${C_RESET}"
@@ -979,7 +988,14 @@ print_summary() {
         echo -e "  ${C_YELLOW}(dry-run mode - no actual changes were made)${C_RESET}"
     fi
     echo -e "${C_BOLD}═══════════════════════════════════════════════════════════════${C_RESET}"
-    } | tee -a "$summary_sink"
+    } )"
+
+    printf '%s\n' "$summary"
+    # On the way to the file the escape codes come off: run from a terminal the
+    # colours are on, and without this they would land in the log anyway.
+    if [[ -n "$summary_sink" ]]; then
+        printf '%s\n' "$summary" | sed 's/\x1b\[[0-9;]*m//g' >> "$summary_sink"
+    fi
 }
 
 # =============================================================================
