@@ -102,6 +102,21 @@ Do not go back to a plain `sudo -v` here: with only `NOPASSWD: /usr/bin/rsync` i
 
 Also keep privileged commands limited to rsync: an unconditional `sudo mkdir -p` in `restore.sh` used to break unattended runs, since sudoers only allows rsync.
 
+### Destination Check (backup.sh)
+
+`check_dst` refuses to run when the destination is a mount point with nothing mounted on it — the directory survives the drive going away, so `-d` alone would let rsync write the whole backup underneath it. It requires a real mount in two cases:
+
+1. fstab declares `base_dst` as a mount point
+2. `base_dst` is a udisks automount directory: `/media/<user>/<label>` or `/run/media/<user>/<label>`
+
+Case 2 is the one that matters in practice — removable drives are never in fstab, and they are exactly the destinations that go missing. Under `/run/media` the backup would fill a tmpfs, i.e. RAM.
+
+`/mnt/<name>` is deliberately **not** in that list, even though it looks like the same case: it is also where people keep plain directories, and refusing those would be a false alarm. Anything really mounted on `/mnt` is normally in fstab, so case 1 covers it.
+
+The patterns stop at that exact depth: `/media/<user>/<label>/backups` is a directory *inside* a mount, not a mount point, and must keep working.
+
+`restore.sh` needs none of this — it already fails on `[[ ! -d "$DST" ]]`, since the per-host backup directory cannot exist on an unmounted mount point.
+
 ### Key Variables in backup.sh / restore.sh
 
 - `ALL_JOBS` — array of `FS`-delimited job records (source, dest, includes, excludes, needs_sudo, label)

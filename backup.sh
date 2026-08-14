@@ -535,15 +535,38 @@ check_dst() {
     fi
     # The directory of a mount point exists even when nothing is mounted on it,
     # so -d alone is not enough: with the drive unmounted rsync would happily
-    # write the whole backup onto the root filesystem. When fstab declares
-    # base_dst as a mount point, require it to be actually mounted. Destinations
-    # not declared in fstab (removable drives under /media, plain directories)
-    # keep the previous behaviour.
-    if findmnt --fstab --mountpoint "$base_dst" >/dev/null 2>&1 \
-       && ! mountpoint -q "$base_dst"; then
+    # write the whole backup underneath it. Require base_dst to be really
+    # mounted in the two cases where it can only ever be a mount point:
+    #
+    #   1. fstab declares it as one;
+    #   2. it is a udisks automount directory — /media/<user>/<label> or
+    #      /run/media/<user>/<label> — created when the drive appears and
+    #      removed when it goes. fstab knows nothing about those, so case 1
+    #      alone leaves removable drives unprotected, which is exactly where
+    #      the drive is missing most often. Under /run/media the backup would
+    #      land in a tmpfs, i.e. in RAM.
+    #
+    # Only those two, deliberately. /mnt/<name> looks like the same case but is
+    # not: it is also where people keep plain directories, and refusing to back
+    # up into one would be a false alarm. Anything mounted on /mnt for real is
+    # normally in fstab, so case 1 already covers it.
+    #
+    # The patterns match that exact depth and no deeper: a destination like
+    # /media/<user>/<label>/backups is a directory *inside* a mount, is not a
+    # mount point itself, and must keep working.
+    local needs_mount=false
+    if findmnt --fstab --mountpoint "$base_dst" >/dev/null 2>&1; then
+        needs_mount=true
+    else
+        case "$base_dst" in
+            /media/*/*/*|/run/media/*/*/*) ;;   # deeper: inside a mount
+            /media/*/*|/run/media/*/*) needs_mount=true ;;
+        esac
+    fi
+    if [[ "$needs_mount" == true ]] && ! mountpoint -q "$base_dst"; then
         echo -e "${C_RED}Error: Destination not mounted: $base_dst${C_RESET}"
-        echo -e "${C_YELLOW}fstab declares it as a mount point but nothing is mounted there.${C_RESET}"
-        echo -e "${C_YELLOW}Mount the backup drive and try again (refusing to back up onto the root filesystem).${C_RESET}"
+        echo -e "${C_YELLOW}The directory is there but nothing is mounted on it.${C_RESET}"
+        echo -e "${C_YELLOW}Mount the backup drive and try again (refusing to back up into an unmounted mount point).${C_RESET}"
         exit 1
     fi
 }
