@@ -2,7 +2,7 @@
 # =============================================================================
 # selftest.sh — End-to-end tests for .local.conf and .conf.override mechanisms
 # =============================================================================
-# Runs 7 tests covering:
+# Runs 8 tests covering:
 #   1. .local.conf auto-discovery (listed as enabled)
 #   2. .conf.override with ENABLED=no disables plugin
 #   3. .conf.override replaces PATH (override content, not base)
@@ -10,6 +10,7 @@
 #   5. Full restore recovers modified file
 #   6. Both files are git-ignored
 #   7. Versioning: overwritten file is preserved in .versions/<timestamp>/
+#   8. "VERSIONING no" in a plugin: overwritten file is NOT kept in .versions/
 # =============================================================================
 set -euo pipefail
 
@@ -72,7 +73,7 @@ PATH $SRC_DIR
 EOF
 
 echo ""
-echo -e "${C_BOLD}Running 7 tests...${C_RESET}"
+echo -e "${C_BOLD}Running 8 tests...${C_RESET}"
 echo ""
 
 # =============================================================================
@@ -218,9 +219,30 @@ fi
 PASS "Old content preserved in ${VERSIONED[0]#"$DST_DIR/"}"
 
 # =============================================================================
+# Test 8: "VERSIONING no" in a plugin — overwritten file is NOT kept in .versions/
+# =============================================================================
+
+INFO "Test 8: a plugin with VERSIONING no mirrors without keeping old versions"
+
+sed -i 's/^ENABLED=yes$/ENABLED=yes\nVERSIONING no/' "$PLUGIN_FILE"
+echo "version 3" > "$SRC_DIR/testfile.txt"
+BEFORE=$(find "$DST_DIR/$BKUP_HOST/.versions" -type f -name testfile.txt | wc -l)
+
+./backup.sh --yes --quiet --no-common --plugin="$PLUGIN_NAME"
+
+if [[ "$(cat "$BKUP_DEST/testfile.txt")" != "version 3" ]]; then
+    FAIL "Backup destination was not updated to new content (test 8)"
+fi
+AFTER=$(find "$DST_DIR/$BKUP_HOST/.versions" -type f -name testfile.txt | wc -l)
+if [[ "$AFTER" -ne "$BEFORE" ]]; then
+    FAIL "A new version landed in .versions/ although the plugin says VERSIONING no (test 8)"
+fi
+PASS "Destination updated, .versions/ untouched ($AFTER copies before and after)"
+
+# =============================================================================
 # Done
 # =============================================================================
 
 echo ""
-echo -e "${C_BOLD}${C_GREEN}All 7 tests passed.${C_RESET}"
+echo -e "${C_BOLD}${C_GREEN}All 8 tests passed.${C_RESET}"
 echo ""

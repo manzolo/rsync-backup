@@ -255,6 +255,13 @@ cp "$DST/$(hostname)/.versions/2026-07-15_173444/home/manzolo/.config/app/file.c
 Version dirs older than `VERSIONS_KEEP_DAYS` are pruned automatically after
 each live run (dry-runs never write nor prune).
 
+A plugin can opt out with a `VERSIONING no` line: all its paths are mirrored
+without `--backup-dir`. Meant for VM disk images (`virt-manager.conf`): a
+`.qcow2` changes on every boot and on every revert to a snapshot, so versioning
+it would store the whole image again on every run. If the same files are also
+under a broader versioned plugin (e.g. `workspaces.conf` covering all of
+`~/Workspaces`), exclude them there too, or that job versions them anyway.
+
 ### common.conf - Always-included Paths
 
 Paths in this file are processed in every run (both backup and restore) unless `--no-common` is specified.

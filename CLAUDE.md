@@ -27,7 +27,7 @@ A Bash-based backup and restore system using `rsync` with a plugin architecture.
 # Syntax check (no tests exist, use bash -n)
 bash -n backup.sh && bash -n restore.sh
 
-# End-to-end self-test (6 tests, patches backup.conf DST to a temp dir)
+# End-to-end self-test (8 tests, writes a temporary .env with DST in a temp dir)
 bash selftest.sh
 ```
 
@@ -54,6 +54,7 @@ Both `backup.sh` and `restore.sh` share the same design: they parse config files
 | `RESTORE_CMD` | Ignored | Shell command **after** rsync (post-restore) |
 | `PRE_RESTORE_CMD` | Ignored | Shell command **before** rsync (pre-restore prompts) |
 | `RESTORE_EXCLUDE` | Ignored (file stays in backup) | Treated as `EXCLUDE` in rsync |
+| `VERSIONING no` | Whole plugin mirrored **without** `--backup-dir` (for VM images that change on every boot) | Ignored |
 
 ### Plugin File Format
 

@@ -187,6 +187,9 @@ VERSIONING
     mirror from propagating accidental deletions or corrupted files.
     Version dirs older than VERSIONS_KEEP_DAYS are pruned after each run.
     To recover a file, copy it back from the .versions dir (plain files).
+    A plugin can opt out with a "VERSIONING no" line: its paths are mirrored
+    without keeping replaced files (meant for VM disk images, which change on
+    every boot and would otherwise be versioned whole on every run).
 
 SUDO HANDLING
     The script automatically detects paths that require elevated privileges:
@@ -273,13 +276,19 @@ version_backup_dir() {
 }
 
 # Parse a conf file with PATH/INCLUDE/EXCLUDE format.
-# Populates ALL_JOBS array with entries: "source|includes|excludes|label"
+# Populates ALL_JOBS array with $FS-separated entries:
+#   source, dest, includes, excludes, needs_sudo, label, versioning
 parse_conf_file() {
     local file="$1"
     local label="$2"
     local current_path=""
     local current_includes=""
     local current_excludes=""
+    # "VERSIONING no" anywhere in the file turns versioning off for all its paths
+    local job_versioning="yes"
+    if grep -qiE '^[[:space:]]*VERSIONING[[:space:]]+no[[:space:]]*$' "$file"; then
+        job_versioning="no"
+    fi
 
     # Flush previous path entry
     _flush_job() {
@@ -289,7 +298,7 @@ parse_conf_file() {
                 needs_sudo="yes"
             fi
             local dest="$DST$current_path"
-            ALL_JOBS+=("${current_path}${FS}${dest}${FS}${current_includes}${FS}${current_excludes}${FS}${needs_sudo}${FS}${label}")
+            ALL_JOBS+=("${current_path}${FS}${dest}${FS}${current_includes}${FS}${current_excludes}${FS}${needs_sudo}${FS}${label}${FS}${job_versioning}")
         fi
     }
 
@@ -306,6 +315,8 @@ parse_conf_file() {
         [[ "$line" == RESTORE_CMD\ * ]] && continue
         [[ "$line" == RESTORE_EXCLUDE\ * ]] && continue
         [[ "$line" == PRE_RESTORE_CMD\ * ]] && continue
+        # Skip VERSIONING line (read above, applies to the whole file)
+        [[ "$line" == VERSIONING\ * ]] && continue
 
         if [[ "$line" == PATH\ * ]]; then
             _flush_job
@@ -606,11 +617,12 @@ validate_paths() {
 build_rsync_args() {
     local job="$1"
     local force_sudo="${2:-}"   # optional override: pass "yes" to force sudo
-    local src includes_str excludes_str needs_sudo
+    local src includes_str excludes_str needs_sudo job_versioning
     src="$(echo "$job" | cut -d"$FS" -f1)"
     includes_str="$(echo "$job" | cut -d"$FS" -f3)"
     excludes_str="$(echo "$job" | cut -d"$FS" -f4)"
     needs_sudo="$(echo "$job" | cut -d"$FS" -f5)"
+    job_versioning="$(echo "$job" | cut -d"$FS" -f7)"
     [[ "$force_sudo" == "yes" ]] && needs_sudo="yes"
 
     local dest="$DST$src"
@@ -628,8 +640,10 @@ build_rsync_args() {
     fi
 
     # Versioning: files deleted or overwritten on the destination are moved to
-    # $DST/.versions/<run timestamp>/<original path> instead of being lost
-    if versioning_active; then
+    # $DST/.versions/<run timestamp>/<original path> instead of being lost.
+    # A plugin can opt out with "VERSIONING no" (e.g. VM disk images, which change
+    # on every boot and would be versioned whole on every run).
+    if versioning_active && [[ "$job_versioning" != "no" ]]; then
         args+=("--backup" "--backup-dir=$(version_backup_dir "$src")")
     fi
 
