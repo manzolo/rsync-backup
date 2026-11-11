@@ -52,6 +52,8 @@ RSYNC_DELETE=yes
 LOG_FILE=""
 VERSIONING=yes          # keep deleted/overwritten files in $DST/.versions/<timestamp>
 VERSIONS_KEEP_DAYS=14   # prune version dirs older than N days (0 = keep forever)
+VERSIONS_KEEP_RUNS=3    # ...but never the N most recent ones, whatever their age
+LOG_FILE_LIST=no        # yes = also write rsync's per-file list to LOG_FILE
 LOG_MAX_MB=20           # rotate LOG_FILE to LOG_FILE.1 above this size (0 = never)
 RUN_TS=""               # timestamp of this run, set in load_global_config
 
@@ -150,6 +152,8 @@ CONFIGURATION FORMAT
         LOG_FILE=/path/to/backup.log
         VERSIONING=yes          # keep replaced/deleted files in .versions/
         VERSIONS_KEEP_DAYS=14   # prune versions older than N days (0 = forever)
+        VERSIONS_KEEP_RUNS=3    # ...but always keep the N most recent runs
+        LOG_FILE_LIST=no        # yes = per-file rsync list in the log too
         LOG_MAX_MB=20           # rotate log above this size (0 = never)
 
     Path config (common.conf and plugins/*.conf):
@@ -185,7 +189,9 @@ VERSIONING
     on the destination are moved to $DST/<hostname>/.versions/<run timestamp>/
     preserving their original path, instead of being lost. This protects the
     mirror from propagating accidental deletions or corrupted files.
-    Version dirs older than VERSIONS_KEEP_DAYS are pruned after each run.
+    Version dirs older than VERSIONS_KEEP_DAYS are pruned after each run,
+    except the VERSIONS_KEEP_RUNS most recent ones (kept whatever their age,
+    so a backup run once a month still has its previous runs to go back to).
     To recover a file, copy it back from the .versions dir (plain files).
     A plugin can opt out with a "VERSIONING no" line: its paths are mirrored
     without keeping replaced files (meant for VM disk images, which change on
@@ -722,7 +728,7 @@ show_preview() {
         echo -e "  Delete:           ${C_GREEN}disabled${C_RESET}"
     fi
     if versioning_active; then
-        echo -e "  Versioning:       ${C_GREEN}.versions/$RUN_TS (keep ${VERSIONS_KEEP_DAYS}d)${C_RESET}"
+        echo -e "  Versioning:       ${C_GREEN}.versions/$RUN_TS (keep ${VERSIONS_KEEP_DAYS}d, at least ${VERSIONS_KEEP_RUNS} runs)${C_RESET}"
     else
         echo -e "  Versioning:       ${C_YELLOW}disabled${C_RESET}"
     fi
@@ -791,7 +797,7 @@ generate_preview_text() {
         echo "  Mode:             LIVE"
     fi
     if versioning_active; then
-        echo "  Versioning:       .versions/$RUN_TS (keep ${VERSIONS_KEEP_DAYS}d)"
+        echo "  Versioning:       .versions/$RUN_TS (keep ${VERSIONS_KEEP_DAYS}d, at least ${VERSIONS_KEEP_RUNS} runs)"
     else
         echo "  Versioning:       disabled"
     fi
@@ -873,6 +879,16 @@ run_backup() {
     local job_num=0
     local total_jobs=${#ALL_JOBS[@]}
 
+    # rsync's stdout and stderr land here per job, so the log can get a short
+    # account of each job (see log_job) instead of the whole file list.
+    JOB_OUT="$(mktemp)"
+    JOB_ERR="$(mktemp)"
+
+    local mode="LIVE"
+    [[ "$DRY_RUN" == true ]] && mode="DRY-RUN"
+    log_line ""
+    log_line "######## $(date '+%Y-%m-%d %H:%M:%S')  backup $RUN_TS  $mode  $total_jobs jobs  -> $DST"
+
     # Pre-create every job's version dir chain as the plain user BEFORE any
     # sudo job runs: sudo rsync would otherwise create shared path prefixes
     # (e.g. .versions/<ts>/home/user/.config) root-owned, and later non-sudo
@@ -903,6 +919,7 @@ run_backup() {
                 echo ""
                 echo -e "${C_YELLOW}[$job_num/$total_jobs] Skipping (not found): $src ($label)${C_RESET}"
             fi
+            log_line "=== [$job_num/$total_jobs] $(date '+%H:%M:%S')  $src ($label)  SKIPPED: not found"
             continue
         fi
 
@@ -937,23 +954,76 @@ run_backup() {
         local cmd
         cmd="$(build_rsync_args "$job" "$needs_sudo")"
 
+        log_line "=== [$job_num/$total_jobs] $(date '+%H:%M:%S')  $src ($label)"
+
+        # stderr goes to its own file in both modes: errors are what the log
+        # must keep whole. In the pipe, eval runs in a subshell where set -e
+        # turns any failure into exit 1 (bash 5.3): set +e there keeps rsync's
+        # own code (23, 24, …), which pipefail then hands to rc.
+        local rc=0 job_start=$SECONDS
         if [[ "$QUIET" == true ]]; then
-            if eval "$cmd" >> "${LOG_FILE:-/dev/null}" 2>&1; then
-                TOTAL_FILES=$((TOTAL_FILES + 1))
-            else
-                TOTAL_ERRORS=$((TOTAL_ERRORS + 1))
-            fi
+            eval "$cmd" > "$JOB_OUT" 2> "$JOB_ERR" || rc=$?
         else
-            if eval "$cmd" 2>&1 | tee -a "${LOG_FILE:-/dev/null}"; then
-                TOTAL_FILES=$((TOTAL_FILES + 1))
-            else
-                TOTAL_ERRORS=$((TOTAL_ERRORS + 1))
-                echo -e "${C_RED}Error backing up: $src${C_RESET}"
-            fi
+            ( set +e; eval "$cmd" ) 2> "$JOB_ERR" | tee "$JOB_OUT" || rc=$?
+            [[ -s "$JOB_ERR" ]] && cat "$JOB_ERR" >&2
         fi
+        if [[ $rc -eq 0 ]]; then
+            TOTAL_FILES=$((TOTAL_FILES + 1))
+        else
+            TOTAL_ERRORS=$((TOTAL_ERRORS + 1))
+            [[ "$QUIET" == false ]] && echo -e "${C_RED}Error backing up: $src${C_RESET}"
+        fi
+        log_job "$rc" $((SECONDS - job_start))
     done
 
+    rm -f "$JOB_OUT" "$JOB_ERR"
     prune_versions
+}
+
+# Append one line to LOG_FILE (no-op without a log).
+log_line() {
+    [[ -n "${LOG_FILE:-}" ]] || return 0
+    printf '%s\n' "$*" >> "$LOG_FILE"
+}
+
+# Write the account of the job just run: rsync's stderr whole, then either the
+# per-file list (LOG_FILE_LIST=yes) or just its counts and rsync's two closing
+# lines. The list made a single run 220,000 lines long, and with LOG_MAX_MB the
+# previous run was already rotated away.
+log_job() {
+    local rc="$1" secs="$2"
+    [[ -n "${LOG_FILE:-}" ]] || return 0
+    {
+        if [[ -s "$JOB_ERR" ]]; then
+            sed 's/^/  ! /' "$JOB_ERR"
+        fi
+        if [[ "${LOG_FILE_LIST:-no}" == "yes" ]]; then
+            cat "$JOB_OUT"
+        else
+            # --progress rewrites its line with \r: split those, then count
+            # transfers from its xfr#N marker; without --progress, count the
+            # list lines instead.
+            tr '\r' '\n' < "$JOB_OUT" | awk '
+                /^deleting /                         { del++; next }
+                /^sent |^total size /                { tail = tail "  " $0 "\n"; next }
+                /^sending incremental file list$/    { next }
+                /^[[:space:]]*$/                     { next }
+                match($0, /xfr#[0-9]+/)              { n = substr($0, RSTART + 4, RLENGTH - 4) + 0
+                                                       if (n > xfr) xfr = n; next }
+                /%/                                  { next }
+                                                     { listed++ }
+                END {
+                    if (xfr > 0) printf "  files transferred: %d, deleted: %d\n", xfr, del
+                    else         printf "  entries listed: %d, deleted: %d\n", listed, del
+                    printf "%s", tail
+                }'
+        fi
+        if [[ "$rc" -eq 0 ]]; then
+            echo "--- ok in ${secs}s"
+        else
+            echo "--- ERROR: rsync exit $rc after ${secs}s"
+        fi
+    } >> "$LOG_FILE"
 }
 
 # Remove version dirs older than VERSIONS_KEEP_DAYS from $DST/.versions.
@@ -971,8 +1041,21 @@ prune_versions() {
 
     [[ "${VERSIONS_KEEP_DAYS:-0}" -gt 0 ]] || return 0
 
-    local -a old_dirs=()
-    mapfile -t old_dirs < <(find "$vroot" -mindepth 1 -maxdepth 1 -type d -mtime "+$VERSIONS_KEEP_DAYS" 2>/dev/null)
+    # The N most recent run dirs stay whatever their age: run once a month,
+    # a 14-day limit alone pruned the previous run on every run, so there was
+    # never more than one to go back to. Dir names are timestamps: they sort.
+    local -a recent=() old_dirs=()
+    mapfile -t recent < <(find "$vroot" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null \
+        | sort -r | head -n "${VERSIONS_KEEP_RUNS:-0}")
+    local d keep r
+    while IFS= read -r d; do
+        [[ -n "$d" ]] || continue
+        keep=false
+        for r in "${recent[@]}"; do
+            [[ "$(basename "$d")" == "$r" ]] && keep=true && break
+        done
+        [[ "$keep" == false ]] && old_dirs+=("$d")
+    done < <(find "$vroot" -mindepth 1 -maxdepth 1 -type d -mtime "+$VERSIONS_KEEP_DAYS" 2>/dev/null)
     [[ ${#old_dirs[@]} -eq 0 ]] && return 0
 
     for d in "${old_dirs[@]}"; do

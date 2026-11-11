@@ -233,8 +233,14 @@ VERSIONING=yes
 # Prune version dirs older than N days after each run (0 = keep forever)
 VERSIONS_KEEP_DAYS=14
 
+# ...but always keep the N most recent version dirs, whatever their age
+VERSIONS_KEEP_RUNS=3
+
 # Rotate LOG_FILE to LOG_FILE.1 above this size in MB (0 = never)
 LOG_MAX_MB=20
+
+# Per-file rsync list in LOG_FILE too (default: counts per job only)
+LOG_FILE_LIST=no
 ```
 
 ### Versioning
@@ -253,7 +259,9 @@ cp "$DST/$(hostname)/.versions/2026-07-15_173444/home/manzolo/.config/app/file.c
 ```
 
 Version dirs older than `VERSIONS_KEEP_DAYS` are pruned automatically after
-each live run (dry-runs never write nor prune).
+each live run (dry-runs never write nor prune), except the `VERSIONS_KEEP_RUNS`
+most recent ones, which stay whatever their age: with a backup run once a month,
+an age limit alone would prune the previous run on every run.
 
 A plugin can opt out with a `VERSIONING no` line: all its paths are mirrored
 without `--backup-dir`. Meant for VM disk images (`virt-manager.conf`): a

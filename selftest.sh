@@ -2,7 +2,7 @@
 # =============================================================================
 # selftest.sh — End-to-end tests for .local.conf and .conf.override mechanisms
 # =============================================================================
-# Runs 8 tests covering:
+# Runs 10 tests covering:
 #   1. .local.conf auto-discovery (listed as enabled)
 #   2. .conf.override with ENABLED=no disables plugin
 #   3. .conf.override replaces PATH (override content, not base)
@@ -11,6 +11,9 @@
 #   6. Both files are git-ignored
 #   7. Versioning: overwritten file is preserved in .versions/<timestamp>/
 #   8. "VERSIONING no" in a plugin: overwritten file is NOT kept in .versions/
+#   9. Log: a header and a closing line per job, counts instead of the file list,
+#      rsync errors kept whole and counted (also without --quiet)
+#  10. Pruning: the VERSIONS_KEEP_RUNS most recent version dirs survive their age
 # =============================================================================
 set -euo pipefail
 
@@ -27,6 +30,16 @@ C_BOLD='\033[1m'
 PASS() { echo -e "  ${C_GREEN}PASS${C_RESET}  $1"; }
 FAIL() { echo -e "  ${C_RED}FAIL${C_RESET}  $1"; exit 1; }
 INFO() { echo -e "  ${C_CYAN}....${C_RESET}  $1"; }
+
+# New content for testfile.txt with an mtime of its own: "version 2" and
+# "version 3" have the same size, and written within the same second rsync's
+# quick check (size + mtime) skipped the file — test 8 failed about 1 run in 3.
+VER_TICK=0
+new_version() {
+    VER_TICK=$((VER_TICK + 1))
+    echo "$1" > "$SRC_DIR/testfile.txt"
+    touch -d "@$(( $(date +%s) + VER_TICK * 10 ))" "$SRC_DIR/testfile.txt"
+}
 
 # --- Test fixtures ---
 WORK_DIR="$(mktemp -d -p "$HOME")"
@@ -201,7 +214,7 @@ PASS "Neither file appears in git status (both are git-ignored)"
 INFO "Test 7: versioning preserves the overwritten file in .versions/"
 
 rm -f "$PLUGIN_OVERRIDE"   # test 6 left an empty override that disables the plugin
-echo "version 2" > "$SRC_DIR/testfile.txt"
+new_version "version 2"
 
 ./backup.sh --yes --quiet --no-common --plugin="$PLUGIN_NAME"
 
@@ -225,7 +238,7 @@ PASS "Old content preserved in ${VERSIONED[0]#"$DST_DIR/"}"
 INFO "Test 8: a plugin with VERSIONING no mirrors without keeping old versions"
 
 sed -i 's/^ENABLED=yes$/ENABLED=yes\nVERSIONING no/' "$PLUGIN_FILE"
-echo "version 3" > "$SRC_DIR/testfile.txt"
+new_version "version 3"
 BEFORE=$(find "$DST_DIR/$BKUP_HOST/.versions" -type f -name testfile.txt | wc -l)
 
 ./backup.sh --yes --quiet --no-common --plugin="$PLUGIN_NAME"
@@ -240,9 +253,84 @@ fi
 PASS "Destination updated, .versions/ untouched ($AFTER copies before and after)"
 
 # =============================================================================
+# Test 9: log — one header and one closing line per job, counts instead of the
+# per-file list, rsync errors kept whole and counted, with and without --quiet
+# =============================================================================
+
+INFO "Test 9: the log tells each job apart and keeps its errors"
+
+LOG="$WORK_DIR/test.log"
+printf 'DST=%s\nLOG_FILE=%s\n' "$DST_DIR" "$LOG" > .env
+sed -i '/^VERSIONING no$/d' "$PLUGIN_FILE"
+new_version "version 4"
+
+./backup.sh --yes --quiet --no-common --plugin="$PLUGIN_NAME" >/dev/null
+
+grep -q "^######## .* backup .* LIVE  1 jobs" "$LOG" || FAIL "No run header in the log (test 9)"
+grep -q "^=== \[1/1\] .*$SRC_DIR (" "$LOG"       || FAIL "No job header in the log (test 9)"
+grep -q "^  files transferred: 1, deleted: 0$" "$LOG" || FAIL "Wrong or missing transfer count (test 9)"
+grep -q "^--- ok in [0-9]*s$" "$LOG"               || FAIL "No closing line for the job (test 9)"
+if grep -q "testfile.txt" "$LOG"; then
+    FAIL "The per-file list reached the log although LOG_FILE_LIST=no (test 9)"
+fi
+PASS "Run and job headers, counts, closing line; no file list"
+
+# A failing rsync. A real error is hard to provoke here: for a file the user
+# cannot read, backup.sh moves the job to sudo rsync, which reads it. What is
+# under test is how backup.sh logs and counts the failure, so a fake rsync
+# first in PATH prints a sender error and exits 23 like the real one.
+FAKE_BIN="$WORK_DIR/fakebin"
+mkdir -p "$FAKE_BIN"
+cat > "$FAKE_BIN/rsync" <<'FAKE'
+#!/usr/bin/env bash
+[[ "${1:-}" == "--version" ]] && exec /usr/bin/rsync --version
+echo "sending incremental file list"
+echo 'rsync: [sender] send_files failed to open "/src/unreadable.txt": Permission denied (13)' >&2
+echo "sent 10 bytes  received 10 bytes  40,00 bytes/sec"
+echo "total size is 4  speedup is 0,20"
+exit 23
+FAKE
+chmod +x "$FAKE_BIN/rsync"
+for mode in --quiet ""; do
+    : > "$LOG"
+    OUT="$(PATH="$FAKE_BIN:$PATH" ./backup.sh --yes $mode --no-common --plugin="$PLUGIN_NAME" 2>&1 || true)"
+    grep -q '^  ! rsync: \[sender\] send_files failed to open .*Permission denied (13)$' "$LOG" \
+        || FAIL "rsync error missing from the log (test 9, mode '${mode:-interactive}')"
+    grep -q "^--- ERROR: rsync exit 23 after" "$LOG" || FAIL "No ERROR closing line (test 9, mode '${mode:-interactive}')"
+    echo "$OUT" | sed 's/\x1b\[[0-9;]*m//g' | grep -q "Jobs with errors: 1" \
+        || FAIL "The failed job was not counted as an error (test 9, mode '${mode:-interactive}')"
+done
+PASS "rsync error kept in the log and counted, with --quiet and without"
+
+# =============================================================================
+# Test 10: pruning keeps the VERSIONS_KEEP_RUNS most recent version dirs,
+# whatever their age, and prunes the older ones past VERSIONS_KEEP_DAYS
+# =============================================================================
+
+INFO "Test 10: the most recent runs survive the age limit"
+
+VROOT="$DST_DIR/$BKUP_HOST/.versions"
+rm -rf "$VROOT"
+for day in 01 02 03 04 05; do
+    mkdir -p "$VROOT/2020-01-${day}_000000/x"
+    echo "old $day" > "$VROOT/2020-01-${day}_000000/x/f"
+    touch -d "2020-01-$day" "$VROOT/2020-01-${day}_000000"
+done
+new_version "version 5"   # this run versions a file: 6 dirs, keep 3
+
+./backup.sh --yes --quiet --no-common --plugin="$PLUGIN_NAME" >/dev/null
+
+LEFT="$(cd "$VROOT" && ls -1 | sort | tr '\n' ' ')"
+[[ $(ls -1 "$VROOT" | wc -l) -eq 3 ]]              || FAIL "Expected 3 version dirs, found: $LEFT (test 10)"
+[[ -d "$VROOT/2020-01-05_000000" && -d "$VROOT/2020-01-04_000000" ]] \
+    || FAIL "The two most recent old runs were pruned: $LEFT (test 10)"
+[[ ! -e "$VROOT/2020-01-03_000000" ]]               || FAIL "A run beyond the last 3 was kept: $LEFT (test 10)"
+PASS "Kept the current run and the two before it: $LEFT"
+
+# =============================================================================
 # Done
 # =============================================================================
 
 echo ""
-echo -e "${C_BOLD}${C_GREEN}All 8 tests passed.${C_RESET}"
+echo -e "${C_BOLD}${C_GREEN}All 10 tests passed.${C_RESET}"
 echo ""
